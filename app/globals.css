@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ---- Light mode: soft purple / gray tones ---- */
+  :root {
+    --background: 264 40% 99%;
+    --foreground: 240 10% 6%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 6%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 6%;
+
+    /* Purple #7c3aed */
+    --primary: 262 83% 58%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 264 30% 95%;
+    --secondary-foreground: 262 60% 30%;
+
+    --muted: 264 25% 96%;
+    --muted-foreground: 240 5% 42%;
+
+    --accent: 270 60% 95%;
+    --accent-foreground: 262 70% 35%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 264 22% 90%;
+    --input: 264 22% 90%;
+    --ring: 262 83% 58%;
+
+    /* Neon-violet brand accents */
+    --brand: 262 83% 58%;
+    --brand-glow: 271 91% 65%;
+
+    --radius: 0.75rem;
+  }
+
+  /* ---- Dark mode: black #09090b + neon violet ---- */
+  .dark {
+    --background: 240 10% 4%;
+    --foreground: 0 0% 98%;
+
+    --card: 240 10% 7%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 240 10% 6%;
+    --popover-foreground: 0 0% 98%;
+
+    /* Neon violet #a855f7 */
+    --primary: 271 91% 65%;
+    --primary-foreground: 240 10% 4%;
+
+    --secondary: 263 30% 14%;
+    --secondary-foreground: 270 60% 90%;
+
+    --muted: 240 6% 12%;
+    --muted-foreground: 240 5% 65%;
+
+    --accent: 263 55% 18%;
+    --accent-foreground: 270 80% 92%;
+
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 6% 16%;
+    --input: 240 6% 18%;
+    --ring: 271 91% 65%;
+
+    --brand: 271 91% 65%;
+    --brand-glow: 271 91% 65%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "cv11", "ss01";
+  }
+}
+
+/* Subtle radial purple glow behind the page in dark mode. */
+.app-bg {
+  background-image: radial-gradient(
+    ellipse 80% 50% at 50% -10%,
+    hsl(var(--brand-glow) / 0.12),
+    transparent 70%
+  );
+}
