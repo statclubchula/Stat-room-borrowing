@@ -22,6 +22,13 @@ export const EMPTY_USER_INFO: UserInfo = {
   contact: "",
 };
 
+/**
+ * Preset options for the "ภาค/สาขา" dropdown (the stat-club sections). Anything
+ * outside this list is entered free-form via the "อื่น ๆ (โปรดระบุ)" choice, so
+ * `major` on {@link UserInfo} stays a plain string either way.
+ */
+export const MAJOR_PRESETS: string[] = ["Stat", "Ins", "Bit"];
+
 /** Today's date as `yyyy-mm-dd` for `<input type="date">` defaults. */
 export function todayISO(): string {
   const now = new Date();

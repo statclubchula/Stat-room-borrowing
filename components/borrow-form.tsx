@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Upload, CalendarClock, X } from "lucide-react";
+import { Loader2, Upload, CalendarClock, X, Plus, Trash2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ import {
   CATEGORY_TEXT_COLORS,
   categoryNeedsReturnDate,
 } from "@/lib/mock-data";
-import { useInventory, borrowItem } from "@/lib/store";
+import { useInventory, borrowItems } from "@/lib/store";
 import {
   EMPTY_USER_INFO,
   todayISO,
@@ -25,11 +25,20 @@ import {
   type UserInfo,
 } from "@/lib/borrow-utils";
 
+/** One row in the borrow list — an item plus how many of it. */
+interface BorrowLine {
+  /** Stable local id for React keys / per-line error lookup. */
+  key: string;
+  itemId: string;
+  quantity: string;
+}
+
+const firstLine = (): BorrowLine => ({ key: "line-1", itemId: "", quantity: "1" });
+
 export function BorrowForm() {
   const inventory = useInventory();
   const [user, setUser] = React.useState<UserInfo>(EMPTY_USER_INFO);
-  const [itemId, setItemId] = React.useState("");
-  const [quantity, setQuantity] = React.useState("1");
+  const [lines, setLines] = React.useState<BorrowLine[]>(() => [firstLine()]);
   const [borrowDate, setBorrowDate] = React.useState(todayISO());
   const [returnDate, setReturnDate] = React.useState("");
   const [fileName, setFileName] = React.useState("");
@@ -38,42 +47,94 @@ export function BorrowForm() {
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [toast, setToast] = React.useState<ToastData | null>(null);
+  // Bumped on reset to remount UserInfoFields (clears its "อื่น ๆ" mode).
+  const [formKey, setFormKey] = React.useState(0);
 
-  const selectedItem = inventory.find((i) => i.id === itemId) ?? null;
+  // Monotonic counter for new line keys (line-2, line-3, …).
+  const lineSeq = React.useRef(1);
+  function makeLine(): BorrowLine {
+    lineSeq.current += 1;
+    return { key: `line-${lineSeq.current}`, itemId: "", quantity: "1" };
+  }
+
   // ---- Core conditional rule ----
-  // Expected Return Date is required for items that must be brought back —
-  // "Equipment" (อุปกรณ์) and "Circulating" (วัสดุหมุนเวียน). It is hidden for
-  // consumed "Non-circulating" (วัสดุไม่หมุนเวียน) items.
-  const needsReturnDate = selectedItem
-    ? categoryNeedsReturnDate(selectedItem.category)
-    : false;
+  // Expected Return Date is required as soon as ANY chosen item must be brought
+  // back — "Equipment" (อุปกรณ์) / "Circulating" (วัสดุหมุนเวียน). It stays hidden
+  // while every chosen item is a consumed "Non-circulating" (วัสดุไม่หมุนเวียน).
+  const anyNeedsReturnDate = lines.some((ln) => {
+    const item = inventory.find((i) => i.id === ln.itemId);
+    return item ? categoryNeedsReturnDate(item.category) : false;
+  });
 
   // ---- Live stock check ----
-  // Warn the moment the typed quantity exceeds what's left, before submit.
-  const liveQuantityError = React.useMemo(() => {
-    if (!selectedItem) return "";
-    const qty = Number(quantity);
-    if (quantity && Number.isFinite(qty) && qty > selectedItem.availableQuantity) {
-      return `เกินจำนวนคงเหลือ — เหลือเพียง ${selectedItem.availableQuantity} ${selectedItem.unit}`;
+  // Warn the moment a line's quantity (aggregated for repeated items) exceeds
+  // what's left, before submit. Keyed by line key.
+  const liveLineErrors = React.useMemo(() => {
+    const demand = new Map<string, number>();
+    const out: Record<string, string> = {};
+    for (const ln of lines) {
+      const item = inventory.find((i) => i.id === ln.itemId);
+      if (!item) continue;
+      const qty = Number(ln.quantity);
+      if (!ln.quantity || !Number.isFinite(qty) || qty <= 0) continue;
+      const cum = (demand.get(item.id) ?? 0) + qty;
+      demand.set(item.id, cum);
+      if (cum > item.availableQuantity) {
+        out[ln.key] = `เกินจำนวนคงเหลือ — เหลือเพียง ${item.availableQuantity} ${item.unit}`;
+      }
     }
-    return "";
-  }, [quantity, selectedItem]);
+    return out;
+  }, [lines, inventory]);
+
+  function updateLine(key: string, patch: Partial<BorrowLine>) {
+    setLines((prev) => prev.map((ln) => (ln.key === key ? { ...ln, ...patch } : ln)));
+  }
+
+  function addLine() {
+    // Build the line outside the updater so its key isn't consumed twice under
+    // React's StrictMode double-invocation.
+    const line = makeLine();
+    setLines((prev) => [...prev, line]);
+  }
+
+  function removeLine(key: string) {
+    setLines((prev) => (prev.length > 1 ? prev.filter((ln) => ln.key !== key) : prev));
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next[`line-item-${key}`];
+      delete next[`line-qty-${key}`];
+      return next;
+    });
+  }
 
   function validate(): Record<string, string> {
     const errs = validateUserInfo(user);
 
-    if (!itemId) errs.itemId = "กรุณาเลือกอุปกรณ์/วัสดุ";
-
-    const qty = Number(quantity);
-    if (!quantity || Number.isNaN(qty) || qty < 1) {
-      errs.quantity = "จำนวนต้องมากกว่า 0";
-    } else if (selectedItem && qty > selectedItem.availableQuantity) {
-      errs.quantity = `คงเหลือเพียง ${selectedItem.availableQuantity} ${selectedItem.unit}`;
-    }
+    // Per-line: item picked + a valid quantity within (aggregated) stock.
+    const demand = new Map<string, number>();
+    lines.forEach((ln) => {
+      if (!ln.itemId) {
+        errs[`line-item-${ln.key}`] = "กรุณาเลือกอุปกรณ์/วัสดุ";
+        return;
+      }
+      const item = inventory.find((i) => i.id === ln.itemId);
+      const qty = Number(ln.quantity);
+      if (!ln.quantity || Number.isNaN(qty) || qty < 1) {
+        errs[`line-qty-${ln.key}`] = "จำนวนต้องมากกว่า 0";
+        return;
+      }
+      if (item) {
+        const cum = (demand.get(item.id) ?? 0) + qty;
+        demand.set(item.id, cum);
+        if (cum > item.availableQuantity) {
+          errs[`line-qty-${ln.key}`] = `คงเหลือเพียง ${item.availableQuantity} ${item.unit}`;
+        }
+      }
+    });
 
     if (!borrowDate) errs.borrowDate = "กรุณาเลือกวันที่ยืม";
 
-    if (needsReturnDate) {
+    if (anyNeedsReturnDate) {
       if (!returnDate) {
         errs.returnDate = "กรุณาเลือกวันที่คาดว่าจะคืน";
       } else if (returnDate < borrowDate) {
@@ -110,12 +171,13 @@ export function BorrowForm() {
 
   function resetForm() {
     setUser(EMPTY_USER_INFO);
-    setItemId("");
-    setQuantity("1");
+    lineSeq.current = 1;
+    setLines([firstLine()]);
     setBorrowDate(todayISO());
     setReturnDate("");
     clearProof();
     setErrors({});
+    setFormKey((k) => k + 1);
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -125,28 +187,35 @@ export function BorrowForm() {
     if (Object.keys(errs).length > 0) return;
 
     setSubmitting(true);
-    const itemName = selectedItem?.name;
-    const unit = selectedItem?.unit;
+    const summary = lines
+      .map((ln) => {
+        const item = inventory.find((i) => i.id === ln.itemId);
+        return item ? `${item.name} × ${ln.quantity} ${item.unit}` : "";
+      })
+      .filter(Boolean);
+
     // Simulate an async save (Google Sheets / Supabase later).
     setTimeout(() => {
       setSubmitting(false);
-      const result = borrowItem({
+      const result = borrowItems({
         user,
-        itemId,
-        quantity: Number(quantity),
         borrowDate,
-        expectedReturnDate: needsReturnDate ? returnDate : undefined,
+        expectedReturnDate: anyNeedsReturnDate ? returnDate : undefined,
         proofPhoto: proofPhoto || undefined,
+        lines: lines.map((ln) => ({ itemId: ln.itemId, quantity: Number(ln.quantity) })),
       });
 
       if (!result.ok) {
-        setErrors((prev) => ({ ...prev, itemId: result.error ?? "บันทึกไม่สำเร็จ" }));
+        setErrors((prev) => ({ ...prev, form: result.error ?? "บันทึกไม่สำเร็จ" }));
         return;
       }
 
       setToast({
         title: "บันทึกการยืมสำเร็จ ✅",
-        description: `${user.nickname} ยืม ${itemName} จำนวน ${quantity} ${unit}`,
+        description:
+          summary.length > 1
+            ? `${user.nickname} ยืม ${summary.length} รายการ: ${summary.join(", ")}`
+            : `${user.nickname} ยืม ${summary[0]}`,
       });
       resetForm();
     }, 700);
@@ -157,85 +226,134 @@ export function BorrowForm() {
       <form onSubmit={handleSubmit} noValidate className="space-y-8">
         {/* ---- User info ---- */}
         <section className="space-y-4">
-          <h3 className="text-sm font-semibold text-foreground">
-            ข้อมูลผู้ยืม
-          </h3>
-          <UserInfoFields value={user} onChange={setUser} errors={errors} />
+          <h3 className="text-sm font-semibold text-foreground">ข้อมูลผู้ยืม</h3>
+          <UserInfoFields
+            key={formKey}
+            value={user}
+            onChange={setUser}
+            errors={errors}
+          />
         </section>
 
-        {/* ---- Item / quantity / dates ---- */}
+        {/* ---- Items (merged item + quantity, repeatable) ---- */}
         <section className="space-y-4">
           <h3 className="text-sm font-semibold text-foreground">
-            รายละเอียดการยืม
+            รายการที่ต้องการยืม
           </h3>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {/* Item selection */}
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="item">
-                เลือกอุปกรณ์/วัสดุ <span className="text-primary">*</span>
-              </Label>
-              <Select
-                id="item"
-                value={itemId}
-                onChange={(e) => {
-                  setItemId(e.target.value);
-                  // Clear a stale return date when switching to a non-circulating item.
-                  setErrors((prev) => ({ ...prev, itemId: "", returnDate: "" }));
-                }}
-                aria-invalid={!!errors.itemId}
-              >
-                <option value="">— เลือกรายการ —</option>
-                {inventory.map((item) => (
-                  <option
-                    key={item.id}
-                    value={item.id}
-                    disabled={item.availableQuantity <= 0}
-                  >
-                    {item.name} ({CATEGORY_LABELS[item.category]}) · เหลือ{" "}
-                    {item.availableQuantity} {item.unit}
-                  </option>
-                ))}
-              </Select>
-              <FieldError message={errors.itemId} />
-              {selectedItem && (
-                <p className="text-xs text-muted-foreground">
-                  ประเภท:{" "}
-                  <span
-                    className={cn(
-                      "font-medium",
-                      CATEGORY_TEXT_COLORS[selectedItem.category]
+          <div className="space-y-3">
+            {lines.map((ln, idx) => {
+              const item = inventory.find((i) => i.id === ln.itemId) ?? null;
+              const itemErr = errors[`line-item-${ln.key}`];
+              const qtyErr = errors[`line-qty-${ln.key}`] || liveLineErrors[ln.key];
+              return (
+                <div
+                  key={ln.key}
+                  className="rounded-lg border border-border bg-muted/20 p-3 duration-200 animate-in fade-in slide-in-from-top-1 motion-reduce:animate-none sm:p-4"
+                >
+                  {/* Row header: index + remove */}
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      รายการที่ {idx + 1}
+                    </span>
+                    {lines.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => removeLine(ln.key)}
+                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-500"
+                        aria-label={`ลบรายการที่ ${idx + 1}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        ลบ
+                      </button>
                     )}
-                  >
-                    {CATEGORY_LABELS[selectedItem.category]}
-                  </span>{" "}
-                  · เก็บที่ {selectedItem.location}
-                </p>
-              )}
-            </div>
+                  </div>
 
-            {/* Quantity */}
-            <div className="space-y-1.5">
-              <Label htmlFor="quantity">
-                จำนวน <span className="text-primary">*</span>
-              </Label>
-              <Input
-                id="quantity"
-                type="number"
-                min={1}
-                max={selectedItem?.availableQuantity ?? undefined}
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                aria-invalid={!!errors.quantity || !!liveQuantityError}
-              />
-              <FieldError message={errors.quantity || liveQuantityError} />
-              {selectedItem && !liveQuantityError && (
-                <p className="text-xs text-muted-foreground">
-                  คงเหลือ {selectedItem.availableQuantity} {selectedItem.unit}
-                </p>
-              )}
-            </div>
+                  {/* Item (left) + Quantity (right) */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_9rem]">
+                    {/* Item */}
+                    <div className="space-y-1.5">
+                      <Label htmlFor={`item-${ln.key}`}>
+                        เลือกอุปกรณ์/วัสดุ <span className="text-primary">*</span>
+                      </Label>
+                      <Select
+                        id={`item-${ln.key}`}
+                        value={ln.itemId}
+                        onChange={(e) => {
+                          updateLine(ln.key, { itemId: e.target.value });
+                          setErrors((prev) => ({
+                            ...prev,
+                            [`line-item-${ln.key}`]: "",
+                            returnDate: "",
+                          }));
+                        }}
+                        aria-invalid={!!itemErr}
+                      >
+                        <option value="">— เลือกรายการ —</option>
+                        {inventory.map((it) => (
+                          <option
+                            key={it.id}
+                            value={it.id}
+                            disabled={it.availableQuantity <= 0}
+                          >
+                            {it.name} ({CATEGORY_LABELS[it.category]}) · เหลือ{" "}
+                            {it.availableQuantity} {it.unit}
+                          </option>
+                        ))}
+                      </Select>
+                      <FieldError message={itemErr} />
+                    </div>
 
+                    {/* Quantity */}
+                    <div className="space-y-1.5">
+                      <Label htmlFor={`qty-${ln.key}`}>
+                        จำนวน <span className="text-primary">*</span>
+                      </Label>
+                      <Input
+                        id={`qty-${ln.key}`}
+                        type="number"
+                        min={1}
+                        max={item?.availableQuantity ?? undefined}
+                        value={ln.quantity}
+                        onChange={(e) => updateLine(ln.key, { quantity: e.target.value })}
+                        aria-invalid={!!qtyErr}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Per-line footnotes: category + quantity error */}
+                  {item && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      ประเภท:{" "}
+                      <span
+                        className={cn(
+                          "font-medium",
+                          CATEGORY_TEXT_COLORS[item.category]
+                        )}
+                      >
+                        {CATEGORY_LABELS[item.category]}
+                      </span>{" "}
+                      · เก็บที่ {item.location}
+                    </p>
+                  )}
+                  <FieldError message={qtyErr} />
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Add another item */}
+          <button
+            type="button"
+            onClick={addLine}
+            className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-input px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+          >
+            <Plus className="h-4 w-4" />
+            เพิ่มรายการ
+          </button>
+
+          {/* Dates */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {/* Borrow date */}
             <div className="space-y-1.5">
               <Label htmlFor="borrowDate">
@@ -251,13 +369,10 @@ export function BorrowForm() {
               <FieldError message={errors.borrowDate} />
             </div>
 
-            {/* Expected return date — items that must be returned.
+            {/* Expected return date — shown when any chosen item must be returned.
                 Pops in when a returnable item is picked. */}
-            {needsReturnDate && (
-              <div
-                key={selectedItem?.id}
-                className="space-y-1.5 rounded-lg border border-primary/30 bg-primary/5 p-4 duration-300 animate-in fade-in slide-in-from-top-2 zoom-in-95 motion-reduce:animate-none sm:col-span-2"
-              >
+            {anyNeedsReturnDate && (
+              <div className="space-y-1.5 rounded-lg border border-primary/30 bg-primary/5 p-4 duration-300 animate-in fade-in slide-in-from-top-2 zoom-in-95 motion-reduce:animate-none sm:col-span-2">
                 <Label htmlFor="returnDate">
                   <span className="inline-flex items-center gap-1.5">
                     <CalendarClock className="h-4 w-4 text-primary" />
@@ -320,7 +435,8 @@ export function BorrowForm() {
         </section>
 
         {/* ---- Submit ---- */}
-        <div className="flex justify-end">
+        <div className="flex flex-col items-end gap-2">
+          <FieldError message={errors.form} />
           <Button type="submit" disabled={submitting} className="min-w-32">
             {submitting ? (
               <>

@@ -19,6 +19,7 @@ import { useSyncExternalStore } from "react";
 import {
   inventory as seedInventory,
   borrowLogs as seedLogs,
+  categoryNeedsReturnDate,
   type InventoryItem,
   type BorrowLog,
   type BorrowStatus,
@@ -179,6 +180,92 @@ export function borrowItem(input: BorrowInput): ActionResult {
   return { ok: true };
 }
 
+/** One line of a multi-item borrow (an item + how many of it). */
+export interface BorrowLineInput {
+  itemId: string;
+  quantity: number;
+}
+
+export interface BorrowManyInput {
+  user: UserInfo;
+  borrowDate: string;
+  /**
+   * Shared expected return date. Applied only to returnable items
+   * (อุปกรณ์ / วัสดุหมุนเวียน) in the batch; consumed items ignore it.
+   */
+  expectedReturnDate?: string;
+  /** Optional borrow-time proof photo (data URL), shared across the batch. */
+  proofPhoto?: string;
+  lines: BorrowLineInput[];
+}
+
+/**
+ * Append one "Borrowed" log per line and decrement each item's stock. Validates
+ * the whole batch first — including aggregated demand when the same item appears
+ * on more than one line — so it either commits everything or nothing.
+ */
+export function borrowItems(input: BorrowManyInput): ActionResult {
+  if (input.lines.length === 0) {
+    return { ok: false, error: "ยังไม่ได้เลือกรายการที่จะยืม" };
+  }
+
+  // Aggregate how many of each item are requested across all lines.
+  const demand = new Map<string, number>();
+  for (const line of input.lines) {
+    if (line.quantity < 1) return { ok: false, error: "จำนวนต้องมากกว่า 0" };
+    demand.set(line.itemId, (demand.get(line.itemId) ?? 0) + line.quantity);
+  }
+
+  // Every item must exist and have enough stock for its total demand.
+  let stockError = "";
+  demand.forEach((qty, itemId) => {
+    if (stockError) return;
+    const item = state.inventory.find((i) => i.id === itemId);
+    if (!item) {
+      stockError = "ไม่พบรายการที่เลือก";
+    } else if (qty > item.availableQuantity) {
+      stockError = `${item.name}: คงเหลือเพียง ${item.availableQuantity} ${item.unit}`;
+    }
+  });
+  if (stockError) return { ok: false, error: stockError };
+
+  // Build the logs, assigning fresh ids that account for ones added this batch.
+  const newLogs: BorrowLog[] = [];
+  for (const line of input.lines) {
+    const item = state.inventory.find((i) => i.id === line.itemId)!;
+    newLogs.push({
+      id: nextId([...state.logs, ...newLogs], "log"),
+      itemId: item.id,
+      itemName: item.name,
+      borrowerName: input.user.nickname,
+      year: input.user.year,
+      major: input.user.major,
+      contact: input.user.contact,
+      quantity: line.quantity,
+      unit: item.unit,
+      borrowDate: input.borrowDate,
+      expectedReturnDate:
+        input.expectedReturnDate && categoryNeedsReturnDate(item.category)
+          ? input.expectedReturnDate
+          : undefined,
+      proofPhoto: input.proofPhoto || undefined,
+      status: "Borrowed",
+    });
+  }
+
+  setState({
+    inventory: state.inventory.map((i) => {
+      const dec = demand.get(i.id) ?? 0;
+      return dec
+        ? { ...i, availableQuantity: i.availableQuantity - dec, lastUpdated: todayISO() }
+        : i;
+    }),
+    logs: [...newLogs, ...state.logs],
+  });
+
+  return { ok: true };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Borrow-log actions (admin corrections)                            */
 /* ------------------------------------------------------------------ */
@@ -321,6 +408,73 @@ export function returnLoan(input: ReturnInput): ActionResult {
     ),
     logs: state.logs.map((l) =>
       l.id === input.logId
+        ? {
+            ...l,
+            status: "Returned",
+            actualReturnDate: input.actualReturnDate,
+            returnProofPhoto: input.proofPhoto || l.returnProofPhoto,
+          }
+        : l
+    ),
+  });
+
+  return { ok: true };
+}
+
+export interface ReturnManyInput {
+  /** The outstanding loans (logs) being returned together. */
+  logIds: string[];
+  actualReturnDate: string;
+  /** Optional return-time condition photo (data URL), shared across the batch. */
+  proofPhoto?: string;
+}
+
+/**
+ * Close several outstanding loans at once, incrementing each linked item's
+ * available stock. Validates the whole batch first (every loan must exist, be
+ * outstanding, and appear only once) so it either commits all or nothing.
+ */
+export function returnLoans(input: ReturnManyInput): ActionResult {
+  if (input.logIds.length === 0) {
+    return { ok: false, error: "ยังไม่ได้เลือกรายการที่จะคืน" };
+  }
+
+  // Reject duplicate selections up front.
+  const unique = new Set(input.logIds);
+  if (unique.size !== input.logIds.length) {
+    return { ok: false, error: "มีรายการซ้ำกัน กรุณาตรวจสอบ" };
+  }
+
+  // Every selected loan must exist and still be outstanding.
+  let err = "";
+  unique.forEach((id) => {
+    if (err) return;
+    const log = state.logs.find((l) => l.id === id);
+    if (!log) err = "ไม่พบรายการยืม";
+    else if (log.status === "Returned") err = "มีรายการที่ถูกคืนไปแล้ว";
+  });
+  if (err) return { ok: false, error: err };
+
+  // How much stock each item gets back across the batch.
+  const restore = new Map<string, number>();
+  unique.forEach((id) => {
+    const log = state.logs.find((l) => l.id === id)!;
+    restore.set(log.itemId, (restore.get(log.itemId) ?? 0) + log.quantity);
+  });
+
+  setState({
+    inventory: state.inventory.map((i) => {
+      const add = restore.get(i.id) ?? 0;
+      return add
+        ? {
+            ...i,
+            availableQuantity: Math.min(i.totalQuantity, i.availableQuantity + add),
+            lastUpdated: todayISO(),
+          }
+        : i;
+    }),
+    logs: state.logs.map((l) =>
+      unique.has(l.id)
         ? {
             ...l,
             status: "Returned",

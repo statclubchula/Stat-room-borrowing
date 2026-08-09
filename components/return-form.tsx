@@ -1,7 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Upload, PackageCheck, AlertTriangle, X } from "lucide-react";
+import {
+  Loader2,
+  Upload,
+  PackageCheck,
+  AlertTriangle,
+  X,
+  Plus,
+  Trash2,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +20,7 @@ import { FieldError } from "@/components/ui/field-error";
 import { UserInfoFields } from "@/components/user-info-fields";
 import { SuccessToast, type ToastData } from "@/components/ui/toast";
 import { resolveLogStatus } from "@/lib/mock-data";
-import { useLogs, returnLoan } from "@/lib/store";
+import { useLogs, returnLoans } from "@/lib/store";
 import {
   EMPTY_USER_INFO,
   todayISO,
@@ -21,12 +29,21 @@ import {
   type UserInfo,
 } from "@/lib/borrow-utils";
 
+/** One row in the return list — a single outstanding loan being returned. */
+interface ReturnLine {
+  /** Stable local id for React keys / per-line error lookup. */
+  key: string;
+  logId: string;
+}
+
+const firstLine = (): ReturnLine => ({ key: "line-1", logId: "" });
+
 export function ReturnForm() {
   const logs = useLogs();
   const today = todayISO();
 
   const [user, setUser] = React.useState<UserInfo>(EMPTY_USER_INFO);
-  const [logId, setLogId] = React.useState("");
+  const [lines, setLines] = React.useState<ReturnLine[]>(() => [firstLine()]);
   const [returnDate, setReturnDate] = React.useState(todayISO());
   const [fileName, setFileName] = React.useState("");
   const [proofPhoto, setProofPhoto] = React.useState("");
@@ -34,21 +51,67 @@ export function ReturnForm() {
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [toast, setToast] = React.useState<ToastData | null>(null);
+  // Bumped on reset to remount UserInfoFields (clears its "อื่น ๆ" mode).
+  const [formKey, setFormKey] = React.useState(0);
 
   // Only still-outstanding loans can be returned (Borrowed → includes Overdue).
   const activeLoans = logs.filter((l) => l.status === "Borrowed");
-  const selectedLoan = activeLoans.find((l) => l.id === logId) ?? null;
-  const selectedIsOverdue =
-    selectedLoan && resolveLogStatus(selectedLoan, today) === "Overdue";
+
+  // Monotonic counter for new line keys (line-2, line-3, …).
+  const lineSeq = React.useRef(1);
+  function makeLine(): ReturnLine {
+    lineSeq.current += 1;
+    return { key: `line-${lineSeq.current}`, logId: "" };
+  }
+
+  /** Loan ids already chosen on OTHER rows — disabled to avoid duplicates. */
+  function takenElsewhere(exceptKey: string): Set<string> {
+    const set = new Set<string>();
+    for (const ln of lines) {
+      if (ln.key !== exceptKey && ln.logId) set.add(ln.logId);
+    }
+    return set;
+  }
+
+  function updateLine(key: string, patch: Partial<ReturnLine>) {
+    setLines((prev) => prev.map((ln) => (ln.key === key ? { ...ln, ...patch } : ln)));
+  }
+
+  function addLine() {
+    // Build the line outside the updater so its key isn't consumed twice under
+    // React's StrictMode double-invocation.
+    const line = makeLine();
+    setLines((prev) => [...prev, line]);
+  }
+
+  function removeLine(key: string) {
+    setLines((prev) => (prev.length > 1 ? prev.filter((ln) => ln.key !== key) : prev));
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next[`line-loan-${key}`];
+      return next;
+    });
+  }
 
   function validate(): Record<string, string> {
     const errs = validateUserInfo(user);
-    if (!logId) errs.logId = "กรุณาเลือกรายการที่คืน";
+
+    // Per-line: a loan must be picked (dupes are prevented by disabling).
+    lines.forEach((ln) => {
+      if (!ln.logId) errs[`line-loan-${ln.key}`] = "กรุณาเลือกรายการที่คืน";
+    });
+
     if (!returnDate) {
       errs.returnDate = "กรุณาเลือกวันที่คืนจริง";
-    } else if (selectedLoan && returnDate < selectedLoan.borrowDate) {
-      errs.returnDate = "วันที่คืนต้องไม่ก่อนวันที่ยืม";
+    } else {
+      // Return date can't precede any selected loan's borrow date.
+      const tooEarly = lines.some((ln) => {
+        const loan = activeLoans.find((l) => l.id === ln.logId);
+        return loan ? returnDate < loan.borrowDate : false;
+      });
+      if (tooEarly) errs.returnDate = "วันที่คืนต้องไม่ก่อนวันที่ยืม";
     }
+
     return errs;
   }
 
@@ -78,10 +141,12 @@ export function ReturnForm() {
 
   function resetForm() {
     setUser(EMPTY_USER_INFO);
-    setLogId("");
+    lineSeq.current = 1;
+    setLines([firstLine()]);
     setReturnDate(todayISO());
     clearProof();
     setErrors({});
+    setFormKey((k) => k + 1);
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -91,25 +156,32 @@ export function ReturnForm() {
     if (Object.keys(errs).length > 0) return;
 
     setSubmitting(true);
-    const summary = selectedLoan
-      ? `${selectedLoan.itemName} จำนวน ${selectedLoan.quantity} ${selectedLoan.unit}`
-      : "";
+    const summary = lines
+      .map((ln) => {
+        const loan = activeLoans.find((l) => l.id === ln.logId);
+        return loan ? `${loan.itemName} × ${loan.quantity} ${loan.unit}` : "";
+      })
+      .filter(Boolean);
+
     setTimeout(() => {
       setSubmitting(false);
-      const result = returnLoan({
-        logId,
+      const result = returnLoans({
+        logIds: lines.map((ln) => ln.logId),
         actualReturnDate: returnDate,
         proofPhoto: proofPhoto || undefined,
       });
 
       if (!result.ok) {
-        setErrors((prev) => ({ ...prev, logId: result.error ?? "บันทึกไม่สำเร็จ" }));
+        setErrors((prev) => ({ ...prev, form: result.error ?? "บันทึกไม่สำเร็จ" }));
         return;
       }
 
       setToast({
         title: "บันทึกการคืนสำเร็จ ✅",
-        description: `${user.nickname} คืน ${summary}`,
+        description:
+          summary.length > 1
+            ? `${user.nickname} คืน ${summary.length} รายการ: ${summary.join(", ")}`
+            : `${user.nickname} คืน ${summary[0]}`,
       });
       resetForm();
     }, 700);
@@ -133,71 +205,139 @@ export function ReturnForm() {
         {/* ---- User info ---- */}
         <section className="space-y-4">
           <h3 className="text-sm font-semibold text-foreground">ข้อมูลผู้คืน</h3>
-          <UserInfoFields value={user} onChange={setUser} errors={errors} />
+          <UserInfoFields
+            key={formKey}
+            value={user}
+            onChange={setUser}
+            errors={errors}
+          />
         </section>
 
-        {/* ---- Loan selection / date ---- */}
+        {/* ---- Loans to return (repeatable) ---- */}
         <section className="space-y-4">
           <h3 className="text-sm font-semibold text-foreground">
-            รายละเอียดการคืน
+            รายการที่ต้องการคืน
           </h3>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {/* Outstanding loan selection */}
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="return-loan">
-                รายการที่คืน <span className="text-primary">*</span>
-              </Label>
-              <Select
-                id="return-loan"
-                value={logId}
-                onChange={(e) => {
-                  setLogId(e.target.value);
-                  setErrors((prev) => ({ ...prev, logId: "" }));
-                }}
-                aria-invalid={!!errors.logId}
-              >
-                <option value="">— เลือกรายการที่ยืมไว้ —</option>
-                {activeLoans.map((loan) => (
-                  <option key={loan.id} value={loan.id}>
-                    {loan.itemName} · {loan.borrowerName} · {loan.quantity}{" "}
-                    {loan.unit} (ยืม {loan.borrowDate})
-                  </option>
-                ))}
-              </Select>
-              <FieldError message={errors.logId} />
+          <div className="space-y-3">
+            {lines.map((ln, idx) => {
+              const loan = activeLoans.find((l) => l.id === ln.logId) ?? null;
+              const loanErr = errors[`line-loan-${ln.key}`];
+              const isOverdue =
+                loan && resolveLogStatus(loan, today) === "Overdue";
+              const taken = takenElsewhere(ln.key);
+              return (
+                <div
+                  key={ln.key}
+                  className="rounded-lg border border-border bg-muted/20 p-3 duration-200 animate-in fade-in slide-in-from-top-1 motion-reduce:animate-none sm:p-4"
+                >
+                  {/* Row header: index + remove */}
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      รายการที่ {idx + 1}
+                    </span>
+                    {lines.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => removeLine(ln.key)}
+                        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-500"
+                        aria-label={`ลบรายการที่ ${idx + 1}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        ลบ
+                      </button>
+                    )}
+                  </div>
 
-              {selectedLoan && (
-                <div className="mt-1.5 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span>
-                      ยืมโดย{" "}
-                      <span className="font-medium text-foreground">
-                        {selectedLoan.borrowerName}
-                      </span>{" "}
-                      · {selectedLoan.year} · {selectedLoan.major}
-                    </span>
-                    {selectedIsOverdue && (
-                      <Badge variant="danger">
-                        <AlertTriangle className="h-3 w-3" />
-                        เกินกำหนด
-                      </Badge>
-                    )}
+                  {/* Loan (left) + quantity (right, read-only) */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_9rem]">
+                    {/* Loan selection */}
+                    <div className="space-y-1.5">
+                      <Label htmlFor={`loan-${ln.key}`}>
+                        รายการที่ยืมไว้ <span className="text-primary">*</span>
+                      </Label>
+                      <Select
+                        id={`loan-${ln.key}`}
+                        value={ln.logId}
+                        onChange={(e) => {
+                          updateLine(ln.key, { logId: e.target.value });
+                          setErrors((prev) => ({
+                            ...prev,
+                            [`line-loan-${ln.key}`]: "",
+                          }));
+                        }}
+                        aria-invalid={!!loanErr}
+                      >
+                        <option value="">— เลือกรายการที่ยืมไว้ —</option>
+                        {activeLoans.map((l) => (
+                          <option
+                            key={l.id}
+                            value={l.id}
+                            disabled={taken.has(l.id)}
+                          >
+                            {l.itemName} · {l.borrowerName} · {l.quantity}{" "}
+                            {l.unit} (ยืม {l.borrowDate})
+                          </option>
+                        ))}
+                      </Select>
+                      <FieldError message={loanErr} />
+                    </div>
+
+                    {/* Quantity being returned (fixed by the loan) */}
+                    <div className="space-y-1.5">
+                      <Label htmlFor={`return-qty-${ln.key}`}>จำนวนที่คืน</Label>
+                      <Input
+                        id={`return-qty-${ln.key}`}
+                        value={loan ? `${loan.quantity} ${loan.unit}` : "—"}
+                        readOnly
+                        tabIndex={-1}
+                        className="cursor-default bg-muted/50 text-muted-foreground"
+                      />
+                    </div>
                   </div>
-                  <div className="mt-1">
-                    จำนวนที่จะคืน:{" "}
-                    <span className="font-medium text-foreground">
-                      {selectedLoan.quantity} {selectedLoan.unit}
-                    </span>
-                    {selectedLoan.expectedReturnDate && (
-                      <> · กำหนดคืน {selectedLoan.expectedReturnDate}</>
-                    )}
-                  </div>
+
+                  {/* Selected-loan detail */}
+                  {loan && (
+                    <div className="mt-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span>
+                          ยืมโดย{" "}
+                          <span className="font-medium text-foreground">
+                            {loan.borrowerName}
+                          </span>{" "}
+                          · {loan.year} · {loan.major}
+                        </span>
+                        {isOverdue && (
+                          <Badge variant="danger">
+                            <AlertTriangle className="h-3 w-3" />
+                            เกินกำหนด
+                          </Badge>
+                        )}
+                      </div>
+                      {loan.expectedReturnDate && (
+                        <div className="mt-1">
+                          กำหนดคืน {loan.expectedReturnDate}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })}
+          </div>
 
-            {/* Actual return date */}
+          {/* Add another item */}
+          <button
+            type="button"
+            onClick={addLine}
+            className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-input px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+          >
+            <Plus className="h-4 w-4" />
+            เพิ่มรายการ
+          </button>
+
+          {/* Actual return date (shared across the batch) */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="actualReturnDate">
                 วันที่คืนจริง <span className="text-primary">*</span>
@@ -253,7 +393,8 @@ export function ReturnForm() {
         </section>
 
         {/* ---- Submit ---- */}
-        <div className="flex justify-end">
+        <div className="flex flex-col items-end gap-2">
+          <FieldError message={errors.form} />
           <Button type="submit" disabled={submitting} className="min-w-32">
             {submitting ? (
               <>
