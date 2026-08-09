@@ -132,8 +132,10 @@ export interface BorrowInput {
   itemId: string;
   quantity: number;
   borrowDate: string;
-  /** Only for Equipment (may be empty / undefined). */
+  /** Only for returnable items (อุปกรณ์ / วัสดุหมุนเวียน); may be empty / undefined. */
   expectedReturnDate?: string;
+  /** Optional borrow-time proof photo (data URL). */
+  proofPhoto?: string;
 }
 
 /** Append a "Borrowed" log and decrement the item's available stock. */
@@ -157,6 +159,7 @@ export function borrowItem(input: BorrowInput): ActionResult {
     unit: item.unit,
     borrowDate: input.borrowDate,
     expectedReturnDate: input.expectedReturnDate || undefined,
+    proofPhoto: input.proofPhoto || undefined,
     status: "Borrowed",
   };
 
@@ -290,6 +293,8 @@ export interface ReturnInput {
   /** The outstanding loan (log) being returned. */
   logId: string;
   actualReturnDate: string;
+  /** Optional return-time condition photo (data URL). */
+  proofPhoto?: string;
 }
 
 /** Close an outstanding loan and increment the item's available stock. */
@@ -316,7 +321,12 @@ export function returnLoan(input: ReturnInput): ActionResult {
     ),
     logs: state.logs.map((l) =>
       l.id === input.logId
-        ? { ...l, status: "Returned", actualReturnDate: input.actualReturnDate }
+        ? {
+            ...l,
+            status: "Returned",
+            actualReturnDate: input.actualReturnDate,
+            returnProofPhoto: input.proofPhoto || l.returnProofPhoto,
+          }
         : l
     ),
   });

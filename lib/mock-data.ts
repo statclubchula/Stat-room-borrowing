@@ -6,8 +6,13 @@
  * `InventoryItem` shape and the rest of the UI keeps working.
  */
 
-/** Two item categories drive the borrow-form logic (return-date required only for Equipment). */
-export type ItemCategory = "Equipment" | "Non-circulating";
+/**
+ * Item categories. Items that must be brought back — "Equipment" (อุปกรณ์) and
+ * "Circulating" (วัสดุหมุนเวียน, e.g. pens) — require a return date in the borrow
+ * form. "Non-circulating" (วัสดุไม่หมุนเวียน) is consumed and taken without a due
+ * date. See `categoryNeedsReturnDate`.
+ */
+export type ItemCategory = "Equipment" | "Circulating" | "Non-circulating";
 
 export interface InventoryItem {
   /** Stable unique id (would be the Sheet row id / Supabase PK in production). */
@@ -33,8 +38,25 @@ export interface InventoryItem {
 /** Thai display labels for each category (used by badges / indicators). */
 export const CATEGORY_LABELS: Record<ItemCategory, string> = {
   Equipment: "อุปกรณ์",
+  Circulating: "วัสดุหมุนเวียน",
   "Non-circulating": "วัสดุไม่หมุนเวียน",
 };
+
+/** Tailwind text-color class per category (shared by the admin table & borrow form). */
+export const CATEGORY_TEXT_COLORS: Record<ItemCategory, string> = {
+  Equipment: "text-primary",
+  Circulating: "text-emerald-500",
+  "Non-circulating": "text-amber-500",
+};
+
+/**
+ * Whether borrowing this category requires an expected return date.
+ * True for items that must be brought back (อุปกรณ์ + วัสดุหมุนเวียน);
+ * false for consumed วัสดุไม่หมุนเวียน.
+ */
+export function categoryNeedsReturnDate(category: ItemCategory): boolean {
+  return category !== "Non-circulating";
+}
 
 export const inventory: InventoryItem[] = [
   {
@@ -205,10 +227,14 @@ export interface BorrowLog {
   unit: string;
   /** yyyy-mm-dd */
   borrowDate: string;
-  /** Expected return date — only for Equipment (may be empty). */
+  /** Expected return date — only for returnable items (อุปกรณ์ / วัสดุหมุนเวียน); may be empty. */
   expectedReturnDate?: string;
   /** Set once the item is actually returned. */
   actualReturnDate?: string;
+  /** Borrow-time proof photo as a data URL. In-memory only — lost on reload. */
+  proofPhoto?: string;
+  /** Return-time condition photo as a data URL. In-memory only. */
+  returnProofPhoto?: string;
   /** Base status as stored ("Borrowed" or "Returned"). */
   status: Exclude<BorrowStatus, "Overdue">;
 }

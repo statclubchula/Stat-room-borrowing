@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Upload, PackageCheck, AlertTriangle } from "lucide-react";
+import { Loader2, Upload, PackageCheck, AlertTriangle, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +17,7 @@ import {
   EMPTY_USER_INFO,
   todayISO,
   validateUserInfo,
+  readProofImage,
   type UserInfo,
 } from "@/lib/borrow-utils";
 
@@ -28,6 +29,8 @@ export function ReturnForm() {
   const [logId, setLogId] = React.useState("");
   const [returnDate, setReturnDate] = React.useState(todayISO());
   const [fileName, setFileName] = React.useState("");
+  const [proofPhoto, setProofPhoto] = React.useState("");
+  const [proofError, setProofError] = React.useState("");
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [toast, setToast] = React.useState<ToastData | null>(null);
@@ -49,11 +52,35 @@ export function ReturnForm() {
     return errs;
   }
 
+  async function handleProofChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) {
+      clearProof();
+      return;
+    }
+    const { dataUrl, error } = await readProofImage(file);
+    if (error || !dataUrl) {
+      setProofError(error ?? "อ่านไฟล์ไม่สำเร็จ");
+      setFileName("");
+      setProofPhoto("");
+      return;
+    }
+    setProofError("");
+    setFileName(file.name);
+    setProofPhoto(dataUrl);
+  }
+
+  function clearProof() {
+    setFileName("");
+    setProofPhoto("");
+    setProofError("");
+  }
+
   function resetForm() {
     setUser(EMPTY_USER_INFO);
     setLogId("");
     setReturnDate(todayISO());
-    setFileName("");
+    clearProof();
     setErrors({});
   }
 
@@ -69,7 +96,11 @@ export function ReturnForm() {
       : "";
     setTimeout(() => {
       setSubmitting(false);
-      const result = returnLoan({ logId, actualReturnDate: returnDate });
+      const result = returnLoan({
+        logId,
+        actualReturnDate: returnDate,
+        proofPhoto: proofPhoto || undefined,
+      });
 
       if (!result.ok) {
         setErrors((prev) => ({ ...prev, logId: result.error ?? "บันทึกไม่สำเร็จ" }));
@@ -198,8 +229,27 @@ export function ReturnForm() {
             type="file"
             accept="image/*"
             className="sr-only"
-            onChange={(e) => setFileName(e.target.files?.[0]?.name ?? "")}
+            onChange={handleProofChange}
           />
+          <FieldError message={proofError} />
+          {proofPhoto && (
+            <div className="flex items-center gap-3 pt-1">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={proofPhoto}
+                alt="ตัวอย่างรูปสภาพของที่คืน"
+                className="h-16 w-16 rounded-md border border-border object-cover"
+              />
+              <button
+                type="button"
+                onClick={clearProof}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-red-500"
+              >
+                <X className="h-3.5 w-3.5" />
+                ลบรูป
+              </button>
+            </div>
+          )}
         </section>
 
         {/* ---- Submit ---- */}

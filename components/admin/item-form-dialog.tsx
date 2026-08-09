@@ -10,6 +10,7 @@ import { Select } from "@/components/ui/select";
 import { Modal } from "@/components/ui/modal";
 import { FieldError } from "@/components/ui/field-error";
 import {
+  CATEGORY_LABELS,
   type InventoryItem,
   type ItemCategory,
 } from "@/lib/mock-data";
@@ -17,7 +18,11 @@ import {
 /** The editable fields of an inventory item (id + lastUpdated are managed by the parent). */
 export type ItemDraft = Omit<InventoryItem, "id" | "lastUpdated">;
 
-const CATEGORIES: ItemCategory[] = ["Equipment", "Non-circulating"];
+const CATEGORIES: ItemCategory[] = [
+  "Equipment",
+  "Circulating",
+  "Non-circulating",
+];
 
 const EMPTY_DRAFT: ItemDraft = {
   name: "",
@@ -134,7 +139,7 @@ export function ItemFormDialog({
           >
             {CATEGORIES.map((cat) => (
               <option key={cat} value={cat}>
-                {cat}
+                {CATEGORY_LABELS[cat]}
               </option>
             ))}
           </Select>

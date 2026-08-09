@@ -18,6 +18,8 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import {
+  CATEGORY_LABELS,
+  CATEGORY_TEXT_COLORS,
   getStockStatus,
   type InventoryItem,
   type StockStatus,
@@ -60,7 +62,8 @@ export function InventoryTable() {
       (i) =>
         i.name.toLowerCase().includes(q) ||
         i.location.toLowerCase().includes(q) ||
-        i.category.toLowerCase().includes(q)
+        i.category.toLowerCase().includes(q) ||
+        CATEGORY_LABELS[i.category].toLowerCase().includes(q)
     );
   }, [items, query]);
 
@@ -165,15 +168,8 @@ export function InventoryTable() {
                       {item.name}
                     </TableCell>
                     <TableCell>
-                      <span
-                        className={cn(
-                          "text-sm",
-                          item.category === "Equipment"
-                            ? "text-primary"
-                            : "text-amber-500"
-                        )}
-                      >
-                        {item.category}
+                      <span className={cn("text-sm", CATEGORY_TEXT_COLORS[item.category])}>
+                        {CATEGORY_LABELS[item.category]}
                       </span>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">

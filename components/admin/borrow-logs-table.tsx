@@ -47,12 +47,40 @@ const FILTERS: Array<{ key: "all" | BorrowStatus; label: string }> = [
   { key: "Returned", label: "Returned" },
 ];
 
+/** A clickable proof-photo thumbnail. */
+function ProofThumb({
+  src,
+  caption,
+  onView,
+}: {
+  src: string;
+  caption: string;
+  onView: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <button
+        type="button"
+        onClick={onView}
+        aria-label={`ดูรูปหลักฐานตอน${caption}`}
+        title={`ดูรูปหลักฐานตอน${caption}`}
+        className="h-9 w-9 shrink-0 overflow-hidden rounded border border-border transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt={`หลักฐานตอน${caption}`} className="h-full w-full object-cover" />
+      </button>
+      <span className="text-[10px] text-muted-foreground">{caption}</span>
+    </div>
+  );
+}
+
 export function BorrowLogsTable() {
   const today = todayISO();
   const logs = useLogs();
   const [filter, setFilter] = React.useState<"all" | BorrowStatus>("all");
   const [editing, setEditing] = React.useState<BorrowLog | null>(null);
   const [deleting, setDeleting] = React.useState<BorrowLog | null>(null);
+  const [viewing, setViewing] = React.useState<{ src: string; title: string } | null>(null);
   const [toast, setToast] = React.useState<ToastData | null>(null);
 
   // Resolve each log's effective status once (derives "Overdue").
@@ -130,13 +158,14 @@ export function BorrowLogsTable() {
               <TableHead>Due Date</TableHead>
               <TableHead>Returned On</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Proof</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={8} className="py-12 text-center">
+                <TableCell colSpan={9} className="py-12 text-center">
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
                     <ClipboardList className="h-8 w-8" />
                     <span className="text-sm">No logs in this status</span>
@@ -191,6 +220,38 @@ export function BorrowLogsTable() {
                         <Icon className="h-3 w-3" />
                         {status}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {log.proofPhoto || log.returnProofPhoto ? (
+                        <div className="flex items-center gap-2">
+                          {log.proofPhoto && (
+                            <ProofThumb
+                              src={log.proofPhoto}
+                              caption="ยืม"
+                              onView={() =>
+                                setViewing({
+                                  src: log.proofPhoto!,
+                                  title: `หลักฐานตอนยืม · ${log.borrowerName} · ${log.itemName}`,
+                                })
+                              }
+                            />
+                          )}
+                          {log.returnProofPhoto && (
+                            <ProofThumb
+                              src={log.returnProofPhoto}
+                              caption="คืน"
+                              onView={() =>
+                                setViewing({
+                                  src: log.returnProofPhoto!,
+                                  title: `หลักฐานตอนคืน · ${log.borrowerName} · ${log.itemName}`,
+                                })
+                              }
+                            />
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground/60">—</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex justify-end gap-1">
@@ -259,6 +320,23 @@ export function BorrowLogsTable() {
             Delete
           </Button>
         </div>
+      </Modal>
+
+      {/* Proof photo lightbox */}
+      <Modal
+        open={viewing !== null}
+        onClose={() => setViewing(null)}
+        title={viewing?.title ?? "หลักฐาน"}
+        className="max-w-2xl"
+      >
+        {viewing && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={viewing.src}
+            alt={viewing.title}
+            className="mx-auto max-h-[65vh] w-auto rounded-md"
+          />
+        )}
       </Modal>
 
       <SuccessToast toast={toast} onClose={() => setToast(null)} />

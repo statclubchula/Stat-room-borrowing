@@ -29,6 +29,36 @@ export function todayISO(): string {
   return new Date(now.getTime() - tzOffset).toISOString().slice(0, 10);
 }
 
+/** Largest proof image we'll inline as a data URL (evidence is ephemeral). */
+export const MAX_PROOF_BYTES = 5 * 1024 * 1024; // 5 MB
+
+export interface ProofRead {
+  dataUrl?: string;
+  error?: string;
+}
+
+/**
+ * Read an image File into a data URL for in-memory preview only. There is no
+ * server upload — the photo lives on the borrow log until the page reloads,
+ * which is enough for an admin to eyeball the evidence and move on.
+ */
+export function readProofImage(file: File): Promise<ProofRead> {
+  return new Promise((resolve) => {
+    if (!file.type.startsWith("image/")) {
+      resolve({ error: "กรุณาเลือกไฟล์รูปภาพ" });
+      return;
+    }
+    if (file.size > MAX_PROOF_BYTES) {
+      resolve({ error: "ไฟล์ใหญ่เกิน 5MB กรุณาเลือกรูปที่เล็กลง" });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => resolve({ dataUrl: String(reader.result) });
+    reader.onerror = () => resolve({ error: "อ่านไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง" });
+    reader.readAsDataURL(file);
+  });
+}
+
 /** Validate the shared user-info block. Returns field->message errors. */
 export function validateUserInfo(info: UserInfo): Record<string, string> {
   const errors: Record<string, string> = {};

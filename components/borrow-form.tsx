@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Upload, CalendarClock } from "lucide-react";
+import { Loader2, Upload, CalendarClock, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -11,12 +11,17 @@ import { Select } from "@/components/ui/select";
 import { FieldError } from "@/components/ui/field-error";
 import { UserInfoFields } from "@/components/user-info-fields";
 import { SuccessToast, type ToastData } from "@/components/ui/toast";
-import { CATEGORY_LABELS } from "@/lib/mock-data";
+import {
+  CATEGORY_LABELS,
+  CATEGORY_TEXT_COLORS,
+  categoryNeedsReturnDate,
+} from "@/lib/mock-data";
 import { useInventory, borrowItem } from "@/lib/store";
 import {
   EMPTY_USER_INFO,
   todayISO,
   validateUserInfo,
+  readProofImage,
   type UserInfo,
 } from "@/lib/borrow-utils";
 
@@ -28,15 +33,31 @@ export function BorrowForm() {
   const [borrowDate, setBorrowDate] = React.useState(todayISO());
   const [returnDate, setReturnDate] = React.useState("");
   const [fileName, setFileName] = React.useState("");
+  const [proofPhoto, setProofPhoto] = React.useState("");
+  const [proofError, setProofError] = React.useState("");
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [toast, setToast] = React.useState<ToastData | null>(null);
 
   const selectedItem = inventory.find((i) => i.id === itemId) ?? null;
   // ---- Core conditional rule ----
-  // Expected Return Date is required ONLY for "Equipment" (อุปกรณ์).
-  // For "Non-circulating" (วัสดุไม่หมุนเวียน) it is hidden entirely.
-  const needsReturnDate = selectedItem?.category === "Equipment";
+  // Expected Return Date is required for items that must be brought back —
+  // "Equipment" (อุปกรณ์) and "Circulating" (วัสดุหมุนเวียน). It is hidden for
+  // consumed "Non-circulating" (วัสดุไม่หมุนเวียน) items.
+  const needsReturnDate = selectedItem
+    ? categoryNeedsReturnDate(selectedItem.category)
+    : false;
+
+  // ---- Live stock check ----
+  // Warn the moment the typed quantity exceeds what's left, before submit.
+  const liveQuantityError = React.useMemo(() => {
+    if (!selectedItem) return "";
+    const qty = Number(quantity);
+    if (quantity && Number.isFinite(qty) && qty > selectedItem.availableQuantity) {
+      return `เกินจำนวนคงเหลือ — เหลือเพียง ${selectedItem.availableQuantity} ${selectedItem.unit}`;
+    }
+    return "";
+  }, [quantity, selectedItem]);
 
   function validate(): Record<string, string> {
     const errs = validateUserInfo(user);
@@ -63,13 +84,37 @@ export function BorrowForm() {
     return errs;
   }
 
+  async function handleProofChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) {
+      clearProof();
+      return;
+    }
+    const { dataUrl, error } = await readProofImage(file);
+    if (error || !dataUrl) {
+      setProofError(error ?? "อ่านไฟล์ไม่สำเร็จ");
+      setFileName("");
+      setProofPhoto("");
+      return;
+    }
+    setProofError("");
+    setFileName(file.name);
+    setProofPhoto(dataUrl);
+  }
+
+  function clearProof() {
+    setFileName("");
+    setProofPhoto("");
+    setProofError("");
+  }
+
   function resetForm() {
     setUser(EMPTY_USER_INFO);
     setItemId("");
     setQuantity("1");
     setBorrowDate(todayISO());
     setReturnDate("");
-    setFileName("");
+    clearProof();
     setErrors({});
   }
 
@@ -91,6 +136,7 @@ export function BorrowForm() {
         quantity: Number(quantity),
         borrowDate,
         expectedReturnDate: needsReturnDate ? returnDate : undefined,
+        proofPhoto: proofPhoto || undefined,
       });
 
       if (!result.ok) {
@@ -158,9 +204,7 @@ export function BorrowForm() {
                   <span
                     className={cn(
                       "font-medium",
-                      selectedItem.category === "Equipment"
-                        ? "text-primary"
-                        : "text-amber-500"
+                      CATEGORY_TEXT_COLORS[selectedItem.category]
                     )}
                   >
                     {CATEGORY_LABELS[selectedItem.category]}
@@ -182,9 +226,14 @@ export function BorrowForm() {
                 max={selectedItem?.availableQuantity ?? undefined}
                 value={quantity}
                 onChange={(e) => setQuantity(e.target.value)}
-                aria-invalid={!!errors.quantity}
+                aria-invalid={!!errors.quantity || !!liveQuantityError}
               />
-              <FieldError message={errors.quantity} />
+              <FieldError message={errors.quantity || liveQuantityError} />
+              {selectedItem && !liveQuantityError && (
+                <p className="text-xs text-muted-foreground">
+                  คงเหลือ {selectedItem.availableQuantity} {selectedItem.unit}
+                </p>
+              )}
             </div>
 
             {/* Borrow date */}
@@ -202,9 +251,13 @@ export function BorrowForm() {
               <FieldError message={errors.borrowDate} />
             </div>
 
-            {/* Expected return date — Equipment only */}
+            {/* Expected return date — items that must be returned.
+                Pops in when a returnable item is picked. */}
             {needsReturnDate && (
-              <div className="space-y-1.5 sm:col-span-2">
+              <div
+                key={selectedItem?.id}
+                className="space-y-1.5 rounded-lg border border-primary/30 bg-primary/5 p-4 duration-300 animate-in fade-in slide-in-from-top-2 zoom-in-95 motion-reduce:animate-none sm:col-span-2"
+              >
                 <Label htmlFor="returnDate">
                   <span className="inline-flex items-center gap-1.5">
                     <CalendarClock className="h-4 w-4 text-primary" />
@@ -221,7 +274,7 @@ export function BorrowForm() {
                 />
                 <FieldError message={errors.returnDate} />
                 <p className="text-xs text-muted-foreground">
-                  จำเป็นสำหรับ &quot;อุปกรณ์&quot; ที่ต้องนำมาคืน
+                  จำเป็นสำหรับ &quot;อุปกรณ์&quot; และ &quot;วัสดุหมุนเวียน&quot; ที่ต้องนำมาคืน
                 </p>
               </div>
             )}
@@ -243,8 +296,27 @@ export function BorrowForm() {
             type="file"
             accept="image/*"
             className="sr-only"
-            onChange={(e) => setFileName(e.target.files?.[0]?.name ?? "")}
+            onChange={handleProofChange}
           />
+          <FieldError message={proofError} />
+          {proofPhoto && (
+            <div className="flex items-center gap-3 pt-1">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={proofPhoto}
+                alt="ตัวอย่างรูปหลักฐาน"
+                className="h-16 w-16 rounded-md border border-border object-cover"
+              />
+              <button
+                type="button"
+                onClick={clearProof}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-red-500"
+              >
+                <X className="h-3.5 w-3.5" />
+                ลบรูป
+              </button>
+            </div>
+          )}
         </section>
 
         {/* ---- Submit ---- */}
