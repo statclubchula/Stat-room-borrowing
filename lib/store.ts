@@ -9,9 +9,12 @@
  *   - returning closes the loan and INCREMENTS stock,
  *   - admin add/edit/delete mutate the same source of truth.
  *
- * State lives at module scope, so it survives client-side navigation between
- * "/" and "/admin" (a full page reload resets it back to the seed data — fine
- * for a mock; swap this layer for Google Sheets / Supabase later).
+ * State lives at module scope AND is persisted to localStorage, so it survives
+ * both client-side navigation and a full page reload — and syncs across tabs.
+ * This matters because "/admin" is reached by a full page load (there is no
+ * client-side link to it), which used to reset everything back to seed data and
+ * hide any borrow/return made on the home page. (Swap this layer for Google
+ * Sheets / Supabase later; clearing the STORAGE_KEY below restores the seed.)
  */
 
 import { useSyncExternalStore } from "react";
@@ -34,10 +37,45 @@ interface StoreState {
   logs: BorrowLog[];
 }
 
-let state: StoreState = {
-  inventory: seedInventory.map((i) => ({ ...i })),
-  logs: seedLogs.map((l) => ({ ...l })),
-};
+/** localStorage slot. Bump the version suffix to invalidate an old schema. */
+const STORAGE_KEY = "stat-room-store-v1";
+
+/** A fresh copy of the seed data (defensive clone so callers can't mutate it). */
+function seedState(): StoreState {
+  return {
+    inventory: seedInventory.map((i) => ({ ...i })),
+    logs: seedLogs.map((l) => ({ ...l })),
+  };
+}
+
+function isStoreState(value: unknown): value is StoreState {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    Array.isArray((value as StoreState).inventory) &&
+    Array.isArray((value as StoreState).logs)
+  );
+}
+
+/** Stable snapshot returned during SSR/hydration (matches the server markup). */
+const serverState: StoreState = seedState();
+
+/** Read persisted state on the client; fall back to seed on server or if empty. */
+function loadInitialState(): StoreState {
+  if (typeof window === "undefined") return seedState();
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (isStoreState(parsed)) return parsed;
+    }
+  } catch {
+    // Corrupt/blocked storage — fall back to seed.
+  }
+  return seedState();
+}
+
+let state: StoreState = loadInitialState();
 
 const listeners = new Set<() => void>();
 
@@ -52,9 +90,38 @@ function subscribe(cb: () => void) {
   };
 }
 
+/** Write the current state to localStorage (best-effort; ignores quota errors). */
+function persist() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage full or unavailable — keep the in-memory state anyway.
+  }
+}
+
 function setState(next: StoreState) {
   state = next;
+  persist();
   emit();
+}
+
+// Keep other tabs/windows (e.g. the home page and /admin open side by side) in
+// sync: a `storage` event fires in every OTHER document when localStorage
+// changes, so we adopt the new state and re-render.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== STORAGE_KEY || e.newValue == null) return;
+    try {
+      const parsed: unknown = JSON.parse(e.newValue);
+      if (isStoreState(parsed)) {
+        state = parsed;
+        emit();
+      }
+    } catch {
+      // Ignore malformed cross-tab payloads.
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -65,7 +132,7 @@ export function useInventory(): InventoryItem[] {
   return useSyncExternalStore(
     subscribe,
     () => state.inventory,
-    () => state.inventory
+    () => serverState.inventory
   );
 }
 
@@ -73,7 +140,7 @@ export function useLogs(): BorrowLog[] {
   return useSyncExternalStore(
     subscribe,
     () => state.logs,
-    () => state.logs
+    () => serverState.logs
   );
 }
 
