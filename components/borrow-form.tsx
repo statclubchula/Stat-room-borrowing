@@ -210,12 +210,13 @@ export function BorrowForm() {
         return;
       }
 
+      const base =
+        summary.length > 1
+          ? `${user.nickname} ยืม ${summary.length} รายการ: ${summary.join(", ")}`
+          : `${user.nickname} ยืม ${summary[0]}`;
       setToast({
         title: "บันทึกการยืมสำเร็จ ✅",
-        description:
-          summary.length > 1
-            ? `${user.nickname} ยืม ${summary.length} รายการ: ${summary.join(", ")}`
-            : `${user.nickname} ยืม ${summary[0]}`,
+        description: result.warning ? `${base} · ⚠️ ${result.warning}` : base,
       });
       resetForm();
     }, 700);

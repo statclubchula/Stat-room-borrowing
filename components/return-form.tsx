@@ -176,12 +176,13 @@ export function ReturnForm() {
         return;
       }
 
+      const base =
+        summary.length > 1
+          ? `${user.nickname} คืน ${summary.length} รายการ: ${summary.join(", ")}`
+          : `${user.nickname} คืน ${summary[0]}`;
       setToast({
         title: "บันทึกการคืนสำเร็จ ✅",
-        description:
-          summary.length > 1
-            ? `${user.nickname} คืน ${summary.length} รายการ: ${summary.join(", ")}`
-            : `${user.nickname} คืน ${summary[0]}`,
+        description: result.warning ? `${base} · ⚠️ ${result.warning}` : base,
       });
       resetForm();
     }, 700);

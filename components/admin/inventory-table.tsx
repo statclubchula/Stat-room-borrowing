@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Plus, Pencil, Trash2, Search, PackageX } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, PackageX, Download } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,8 @@ import {
   deleteInventoryItem,
 } from "@/lib/store";
 import { ItemFormDialog, type ItemDraft } from "@/components/admin/item-form-dialog";
+import { toCsv, downloadCsv } from "@/lib/export-utils";
+import { todayISO } from "@/lib/borrow-utils";
 
 const STATUS_VARIANT: Record<
   StockStatus,
@@ -106,6 +108,33 @@ export function InventoryTable() {
     });
   }
 
+  function handleExport() {
+    const csv = toCsv(
+      [
+        "ID",
+        "Item Name",
+        "Category",
+        "Available",
+        "Total",
+        "Unit",
+        "Location",
+        "Last Updated",
+      ],
+      // Export the current search result, so a filtered view exports as shown.
+      filtered.map((i) => [
+        i.id,
+        i.name,
+        CATEGORY_LABELS[i.category],
+        i.availableQuantity,
+        i.totalQuantity,
+        i.unit,
+        i.location,
+        i.lastUpdated,
+      ])
+    );
+    downloadCsv(`inventory-${todayISO()}.csv`, csv);
+  }
+
   return (
     <>
       {/* Summary + actions */}
@@ -126,6 +155,15 @@ export function InventoryTable() {
               className="w-40 pl-9 sm:w-52"
             />
           </div>
+          <Button
+            variant="outline"
+            onClick={handleExport}
+            disabled={filtered.length === 0}
+            className="shrink-0"
+          >
+            <Download className="h-4 w-4" />
+            Export
+          </Button>
           <Button onClick={openAdd} className="shrink-0">
             <Plus className="h-4 w-4" />
             Add Item

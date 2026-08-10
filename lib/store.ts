@@ -90,21 +90,33 @@ function subscribe(cb: () => void) {
   };
 }
 
-/** Write the current state to localStorage (best-effort; ignores quota errors). */
-function persist() {
-  if (typeof window === "undefined") return;
+/**
+ * Write the current state to localStorage. Returns whether the write succeeded
+ * so callers can warn the user when it didn't (e.g. quota exceeded because a
+ * large proof photo filled the ~5MB budget) instead of losing data silently.
+ */
+function persist(): boolean {
+  if (typeof window === "undefined") return true;
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
   } catch {
-    // Storage full or unavailable — keep the in-memory state anyway.
+    // Storage full or unavailable — keep the in-memory state, report the miss.
+    return false;
   }
 }
 
-function setState(next: StoreState) {
+/** Apply new state, persist it, and notify subscribers. Returns persist success. */
+function setState(next: StoreState): boolean {
   state = next;
-  persist();
+  const saved = persist();
   emit();
+  return saved;
 }
+
+/** Shown when a change applied in memory but couldn't be saved to localStorage. */
+const PERSIST_WARNING =
+  "บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บของเบราว์เซอร์อาจเต็ม ข้อมูลนี้อาจหายเมื่อรีเฟรชหน้า";
 
 // Keep other tabs/windows (e.g. the home page and /admin open side by side) in
 // sync: a `storage` event fires in every OTHER document when localStorage
@@ -186,6 +198,15 @@ export function deleteInventoryItem(id: string): void {
   });
 }
 
+/**
+ * Discard every borrow/return and inventory edit, restoring the seed data. Used
+ * by the admin "reset data" control; also overwrites the persisted copy so the
+ * seed sticks across reloads and syncs to other open tabs.
+ */
+export function resetStore(): void {
+  setState(seedState());
+}
+
 /* ------------------------------------------------------------------ */
 /*  Borrow / return actions                                           */
 /* ------------------------------------------------------------------ */
@@ -193,6 +214,8 @@ export function deleteInventoryItem(id: string): void {
 export interface ActionResult {
   ok: boolean;
   error?: string;
+  /** Set when the change applied in memory but couldn't be persisted (see PERSIST_WARNING). */
+  warning?: string;
 }
 
 export interface BorrowInput {
@@ -231,7 +254,7 @@ export function borrowItem(input: BorrowInput): ActionResult {
     status: "Borrowed",
   };
 
-  setState({
+  const saved = setState({
     inventory: state.inventory.map((i) =>
       i.id === item.id
         ? {
@@ -244,7 +267,7 @@ export function borrowItem(input: BorrowInput): ActionResult {
     logs: [log, ...state.logs],
   });
 
-  return { ok: true };
+  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
 }
 
 /** One line of a multi-item borrow (an item + how many of it). */
@@ -320,7 +343,7 @@ export function borrowItems(input: BorrowManyInput): ActionResult {
     });
   }
 
-  setState({
+  const saved = setState({
     inventory: state.inventory.map((i) => {
       const dec = demand.get(i.id) ?? 0;
       return dec
@@ -330,7 +353,7 @@ export function borrowItems(input: BorrowManyInput): ActionResult {
     logs: [...newLogs, ...state.logs],
   });
 
-  return { ok: true };
+  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
 }
 
 /* ------------------------------------------------------------------ */
@@ -459,7 +482,7 @@ export function returnLoan(input: ReturnInput): ActionResult {
     return { ok: false, error: "รายการนี้ถูกคืนไปแล้ว" };
   }
 
-  setState({
+  const saved = setState({
     inventory: state.inventory.map((i) =>
       i.id === log.itemId
         ? {
@@ -485,7 +508,7 @@ export function returnLoan(input: ReturnInput): ActionResult {
     ),
   });
 
-  return { ok: true };
+  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
 }
 
 export interface ReturnManyInput {
@@ -529,7 +552,7 @@ export function returnLoans(input: ReturnManyInput): ActionResult {
     restore.set(log.itemId, (restore.get(log.itemId) ?? 0) + log.quantity);
   });
 
-  setState({
+  const saved = setState({
     inventory: state.inventory.map((i) => {
       const add = restore.get(i.id) ?? 0;
       return add
@@ -552,5 +575,5 @@ export function returnLoans(input: ReturnManyInput): ActionResult {
     ),
   });
 
-  return { ok: true };
+  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
 }

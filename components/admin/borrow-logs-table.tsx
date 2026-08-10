@@ -8,6 +8,7 @@ import {
   ClipboardList,
   Pencil,
   Trash2,
+  Download,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +30,8 @@ import {
 } from "@/lib/mock-data";
 import { useLogs, updateLog, deleteLog, type LogDraft } from "@/lib/store";
 import { todayISO } from "@/lib/borrow-utils";
+import { toCsv, downloadCsv } from "@/lib/export-utils";
+import { CATEGORY_STATUS_LABELS } from "@/lib/mock-data";
 import { LogFormDialog } from "@/components/admin/log-form-dialog";
 
 const STATUS_META: Record<
@@ -126,25 +129,72 @@ export function BorrowLogsTable() {
     });
   }
 
+  function handleExport() {
+    const csv = toCsv(
+      [
+        "ID",
+        "Borrower",
+        "Year",
+        "Major",
+        "Contact",
+        "Item Name",
+        "Quantity",
+        "Unit",
+        "Borrow Date",
+        "Due Date",
+        "Returned On",
+        "Status",
+      ],
+      // Export the current filter view; proof photos (data URLs) are omitted.
+      filtered.map(({ log, status }) => [
+        log.id,
+        log.borrowerName,
+        log.year,
+        log.major,
+        log.contact,
+        log.itemName,
+        log.quantity,
+        log.unit,
+        log.borrowDate,
+        log.expectedReturnDate ?? "",
+        log.actualReturnDate ?? "",
+        CATEGORY_STATUS_LABELS[status],
+      ])
+    );
+    downloadCsv(`borrow-history-${today}.csv`, csv);
+  }
+
   return (
     <>
-      {/* Filter chips */}
-      <div className="mb-4 flex flex-wrap gap-2">
-        {FILTERS.map((f) => {
-          const count =
-            f.key === "all" ? rows.length : counts[f.key as BorrowStatus];
-          return (
-            <Button
-              key={f.key}
-              variant={filter === f.key ? "default" : "outline"}
-              size="sm"
-              onClick={() => setFilter(f.key)}
-            >
-              {f.label}
-              <span className="ml-1 opacity-70">({count})</span>
-            </Button>
-          );
-        })}
+      {/* Filter chips + export */}
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap gap-2">
+          {FILTERS.map((f) => {
+            const count =
+              f.key === "all" ? rows.length : counts[f.key as BorrowStatus];
+            return (
+              <Button
+                key={f.key}
+                variant={filter === f.key ? "default" : "outline"}
+                size="sm"
+                onClick={() => setFilter(f.key)}
+              >
+                {f.label}
+                <span className="ml-1 opacity-70">({count})</span>
+              </Button>
+            );
+          })}
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleExport}
+          disabled={filtered.length === 0}
+          className="shrink-0"
+        >
+          <Download className="h-4 w-4" />
+          Export
+        </Button>
       </div>
 
       <div className="rounded-lg border border-border">

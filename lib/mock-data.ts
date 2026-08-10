@@ -231,9 +231,9 @@ export interface BorrowLog {
   expectedReturnDate?: string;
   /** Set once the item is actually returned. */
   actualReturnDate?: string;
-  /** Borrow-time proof photo as a data URL. In-memory only — lost on reload. */
+  /** Borrow-time proof photo as a (downscaled) data URL; persisted with the store. */
   proofPhoto?: string;
-  /** Return-time condition photo as a data URL. In-memory only. */
+  /** Return-time condition photo as a (downscaled) data URL; persisted with the store. */
   returnProofPhoto?: string;
   /** Base status as stored ("Borrowed" or "Returned"). */
   status: Exclude<BorrowStatus, "Overdue">;
