@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Upload, CalendarClock, X, Plus, Trash2 } from "lucide-react";
+import { Loader2, CalendarClock, Plus, Trash2, MessageCircle } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,6 @@ import {
   EMPTY_USER_INFO,
   todayISO,
   validateUserInfo,
-  readProofImage,
   type UserInfo,
 } from "@/lib/borrow-utils";
 
@@ -41,9 +40,6 @@ export function BorrowForm() {
   const [lines, setLines] = React.useState<BorrowLine[]>(() => [firstLine()]);
   const [borrowDate, setBorrowDate] = React.useState(todayISO());
   const [returnDate, setReturnDate] = React.useState("");
-  const [fileName, setFileName] = React.useState("");
-  const [proofPhoto, setProofPhoto] = React.useState("");
-  const [proofError, setProofError] = React.useState("");
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [toast, setToast] = React.useState<ToastData | null>(null);
@@ -145,37 +141,12 @@ export function BorrowForm() {
     return errs;
   }
 
-  async function handleProofChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) {
-      clearProof();
-      return;
-    }
-    const { dataUrl, error } = await readProofImage(file);
-    if (error || !dataUrl) {
-      setProofError(error ?? "อ่านไฟล์ไม่สำเร็จ");
-      setFileName("");
-      setProofPhoto("");
-      return;
-    }
-    setProofError("");
-    setFileName(file.name);
-    setProofPhoto(dataUrl);
-  }
-
-  function clearProof() {
-    setFileName("");
-    setProofPhoto("");
-    setProofError("");
-  }
-
   function resetForm() {
     setUser(EMPTY_USER_INFO);
     lineSeq.current = 1;
     setLines([firstLine()]);
     setBorrowDate(todayISO());
     setReturnDate("");
-    clearProof();
     setErrors({});
     setFormKey((k) => k + 1);
   }
@@ -201,7 +172,6 @@ export function BorrowForm() {
         user,
         borrowDate,
         expectedReturnDate: anyNeedsReturnDate ? returnDate : undefined,
-        proofPhoto: proofPhoto || undefined,
         lines: lines.map((ln) => ({ itemId: ln.itemId, quantity: Number(ln.quantity) })),
       });
 
@@ -397,42 +367,16 @@ export function BorrowForm() {
           </div>
         </section>
 
-        {/* ---- Photo / proof attachment ---- */}
-        <section className="space-y-1.5">
-          <Label htmlFor="proof">แนบรูป/หลักฐาน (ถ้ามี)</Label>
-          <label
-            htmlFor="proof"
-            className="flex cursor-pointer items-center gap-3 rounded-md border border-dashed border-input bg-background px-3 py-3 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
-          >
-            <Upload className="h-4 w-4" />
-            {fileName || "เลือกไฟล์รูปภาพ…"}
-          </label>
-          <input
-            id="proof"
-            type="file"
-            accept="image/*"
-            className="sr-only"
-            onChange={handleProofChange}
-          />
-          <FieldError message={proofError} />
-          {proofPhoto && (
-            <div className="flex items-center gap-3 pt-1">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={proofPhoto}
-                alt="ตัวอย่างรูปหลักฐาน"
-                className="h-16 w-16 rounded-md border border-border object-cover"
-              />
-              <button
-                type="button"
-                onClick={clearProof}
-                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-red-500"
-              >
-                <X className="h-3.5 w-3.5" />
-                ลบรูป
-              </button>
-            </div>
-          )}
+        {/* ---- Proof photo reminder (sent to the LINE OA, not this site) ---- */}
+        <section className="flex items-start gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+          <MessageCircle className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+          <div className="space-y-1 text-sm">
+            <p className="font-medium text-foreground">อย่าลืมส่งรูปหลักฐาน</p>
+            <p className="text-muted-foreground">
+              หลังกดยืนยันการยืม กรุณา <strong>ถ่ายรูปของที่ยืม แล้วส่งเข้า LINE
+              OA ของชมรม</strong> เพื่อเป็นหลักฐาน (ระบบนี้ไม่เก็บรูป — ส่งทางไลน์เท่านั้น)
+            </p>
+          </div>
         </section>
 
         {/* ---- Submit ---- */}

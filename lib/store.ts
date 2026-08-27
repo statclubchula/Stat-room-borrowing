@@ -3,31 +3,42 @@
 /**
  * lib/store.ts
  *
- * A tiny dependency-free client store shared across the Borrow form, Return
- * form, and Admin panel. It holds the live inventory + borrow logs so that:
+ * The shared client store behind the Borrow form, Return form, and Admin panel.
+ * It holds the live inventory + borrow logs so that:
  *   - borrowing appends a log and DECREMENTS stock,
  *   - returning closes the loan and INCREMENTS stock,
  *   - admin add/edit/delete mutate the same source of truth.
  *
- * State lives at module scope AND is persisted to localStorage, so it survives
- * both client-side navigation and a full page reload — and syncs across tabs.
- * This matters because "/admin" is reached by a full page load (there is no
- * client-side link to it), which used to reset everything back to seed data and
- * hide any borrow/return made on the home page. (Swap this layer for Google
- * Sheets / Supabase later; clearing the STORAGE_KEY below restores the seed.)
+ * Backend: Supabase (Postgres + Realtime). The store keeps an in-memory cache
+ * for instant, synchronous reads/writes (the UI calls stay synchronous), then:
+ *   1. applies each change OPTIMISTICALLY to the cache and re-renders,
+ *   2. pushes the change to Supabase in the background,
+ *   3. re-fetches on any Realtime event so every device — the person on their
+ *      own phone, the admin laptop — converges on the same authoritative data.
+ *
+ * If Supabase isn't configured (no `.env.local`), the client is null and the
+ * app degrades to in-memory seed data (no persistence, no sync) so it still runs.
  */
 
 import { useSyncExternalStore } from "react";
 
 import {
   inventory as seedInventory,
-  borrowLogs as seedLogs,
   categoryNeedsReturnDate,
   type InventoryItem,
   type BorrowLog,
   type BorrowStatus,
 } from "@/lib/mock-data";
 import { todayISO, type UserInfo } from "@/lib/borrow-utils";
+import {
+  supabase,
+  itemFromRow,
+  logFromRow,
+  rowFromItem,
+  rowFromLog,
+  type InventoryRow,
+  type BorrowLogRow,
+} from "@/lib/supabase";
 
 /** Editable inventory fields (id + lastUpdated are managed by the store). */
 export type ItemDraft = Omit<InventoryItem, "id" | "lastUpdated">;
@@ -37,45 +48,22 @@ interface StoreState {
   logs: BorrowLog[];
 }
 
-/** localStorage slot. Bump the version suffix to invalidate an old schema. */
-const STORAGE_KEY = "stat-room-store-v1";
-
-/** A fresh copy of the seed data (defensive clone so callers can't mutate it). */
+/** A fresh copy of the seed inventory (defensive clone so callers can't mutate it). */
 function seedState(): StoreState {
   return {
     inventory: seedInventory.map((i) => ({ ...i })),
-    logs: seedLogs.map((l) => ({ ...l })),
+    logs: [],
   };
 }
 
-function isStoreState(value: unknown): value is StoreState {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    Array.isArray((value as StoreState).inventory) &&
-    Array.isArray((value as StoreState).logs)
-  );
-}
-
-/** Stable snapshot returned during SSR/hydration (matches the server markup). */
+/**
+ * Stable snapshot for SSR *and* the client's first paint. Both start from the
+ * same seed so hydration markup matches; the client then swaps in live Supabase
+ * data via `refetchAll()` right after mount.
+ */
 const serverState: StoreState = seedState();
 
-/** Read persisted state on the client; fall back to seed on server or if empty. */
-function loadInitialState(): StoreState {
-  if (typeof window === "undefined") return seedState();
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      if (isStoreState(parsed)) return parsed;
-    }
-  } catch {
-    // Corrupt/blocked storage — fall back to seed.
-  }
-  return seedState();
-}
-
-let state: StoreState = loadInitialState();
+let state: StoreState = seedState();
 
 const listeners = new Set<() => void>();
 
@@ -90,50 +78,117 @@ function subscribe(cb: () => void) {
   };
 }
 
-/**
- * Write the current state to localStorage. Returns whether the write succeeded
- * so callers can warn the user when it didn't (e.g. quota exceeded because a
- * large proof photo filled the ~5MB budget) instead of losing data silently.
- */
-function persist(): boolean {
-  if (typeof window === "undefined") return true;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    return true;
-  } catch {
-    // Storage full or unavailable — keep the in-memory state, report the miss.
-    return false;
-  }
-}
-
-/** Apply new state, persist it, and notify subscribers. Returns persist success. */
-function setState(next: StoreState): boolean {
+/** Apply new in-memory state and notify subscribers. */
+function setState(next: StoreState): void {
   state = next;
-  const saved = persist();
   emit();
-  return saved;
 }
 
-/** Shown when a change applied in memory but couldn't be saved to localStorage. */
-const PERSIST_WARNING =
-  "บันทึกลงเครื่องไม่สำเร็จ — พื้นที่จัดเก็บของเบราว์เซอร์อาจเต็ม ข้อมูลนี้อาจหายเมื่อรีเฟรชหน้า";
+/* ------------------------------------------------------------------ */
+/*  Supabase sync                                                      */
+/* ------------------------------------------------------------------ */
 
-// Keep other tabs/windows (e.g. the home page and /admin open side by side) in
-// sync: a `storage` event fires in every OTHER document when localStorage
-// changes, so we adopt the new state and re-render.
-if (typeof window !== "undefined") {
-  window.addEventListener("storage", (e) => {
-    if (e.key !== STORAGE_KEY || e.newValue == null) return;
-    try {
-      const parsed: unknown = JSON.parse(e.newValue);
-      if (isStoreState(parsed)) {
-        state = parsed;
-        emit();
+/**
+ * Fire a background write to Supabase. Errors don't block the (already-applied)
+ * optimistic update; instead we log them and re-fetch so the cache falls back
+ * to the server's truth. A Realtime event from our own successful write also
+ * triggers a re-fetch, which reconciles anything the optimistic math got wrong.
+ */
+function queue(
+  op: () => PromiseLike<{ error: unknown | null }>,
+  label: string
+): void {
+  if (!supabase) return;
+  Promise.resolve()
+    .then(op)
+    .then((res) => {
+      if (res?.error) {
+        console.error(`[store] ${label} failed:`, res.error);
+        void refetchAll();
       }
-    } catch {
-      // Ignore malformed cross-tab payloads.
-    }
+    })
+    .catch((err) => {
+      console.error(`[store] ${label} threw:`, err);
+      void refetchAll();
+    });
+}
+
+function pushItemUpserts(items: InventoryItem[]): void {
+  if (!supabase || items.length === 0) return;
+  queue(
+    () => supabase!.from("inventory").upsert(items.map(rowFromItem)),
+    "inventory upsert"
+  );
+}
+
+function pushItemDelete(id: string): void {
+  if (!supabase) return;
+  queue(() => supabase!.from("inventory").delete().eq("id", id), "inventory delete");
+}
+
+function pushLogInserts(logs: BorrowLog[]): void {
+  if (!supabase || logs.length === 0) return;
+  queue(
+    () => supabase!.from("borrow_logs").insert(logs.map(rowFromLog)),
+    "borrow_logs insert"
+  );
+}
+
+function pushLogUpserts(logs: BorrowLog[]): void {
+  if (!supabase || logs.length === 0) return;
+  queue(
+    () => supabase!.from("borrow_logs").upsert(logs.map(rowFromLog)),
+    "borrow_logs upsert"
+  );
+}
+
+function pushLogDelete(id: string): void {
+  if (!supabase) return;
+  queue(() => supabase!.from("borrow_logs").delete().eq("id", id), "borrow_logs delete");
+}
+
+/** Pull the authoritative inventory + logs from Supabase into the cache. */
+async function refetchAll(): Promise<void> {
+  if (!supabase) return;
+  const [invRes, logRes] = await Promise.all([
+    supabase.from("inventory").select("*").order("id", { ascending: true }),
+    supabase
+      .from("borrow_logs")
+      .select("*")
+      .order("created_at", { ascending: false }),
+  ]);
+  if (invRes.error) {
+    console.error("[store] fetch inventory failed:", invRes.error);
+    return;
+  }
+  if (logRes.error) {
+    console.error("[store] fetch borrow_logs failed:", logRes.error);
+    return;
+  }
+  setState({
+    inventory: (invRes.data as InventoryRow[]).map(itemFromRow),
+    logs: (logRes.data as BorrowLogRow[]).map(logFromRow),
   });
+}
+
+// On the client, hydrate from Supabase once and keep in sync via Realtime.
+// Every insert/update/delete on either table re-pulls the authoritative state,
+// so a borrow made on someone's phone shows up on the admin screen live.
+if (typeof window !== "undefined" && supabase) {
+  void refetchAll();
+  supabase
+    .channel("stat-room-store")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "inventory" },
+      () => void refetchAll()
+    )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "borrow_logs" },
+      () => void refetchAll()
+    )
+    .subscribe();
 }
 
 /* ------------------------------------------------------------------ */
@@ -160,12 +215,22 @@ export function useLogs(): BorrowLog[] {
 /*  Id helpers                                                         */
 /* ------------------------------------------------------------------ */
 
-function nextId(items: { id: string }[], prefix: string): string {
+/** Next `itm-NNN` id for a new inventory item (borrow logs use UUIDs). */
+function nextItemId(items: { id: string }[]): string {
   const max = items.reduce((acc, i) => {
     const n = Number(i.id.replace(/\D/g, ""));
     return Number.isFinite(n) ? Math.max(acc, n) : acc;
   }, 0);
-  return `${prefix}-${String(max + 1).padStart(3, "0")}`;
+  return `itm-${String(max + 1).padStart(3, "0")}`;
+}
+
+/** Fresh UUID for a borrow log — matches the DB's `gen_random_uuid()` PK. */
+function newLogId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  // Extremely old browser fallback (should never run in practice).
+  return `log-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,21 +239,24 @@ function nextId(items: { id: string }[], prefix: string): string {
 
 export function addInventoryItem(draft: ItemDraft): InventoryItem {
   const item: InventoryItem = {
-    id: nextId(state.inventory, "itm"),
+    id: nextItemId(state.inventory),
     ...draft,
     lastUpdated: todayISO(),
   };
   setState({ ...state, inventory: [...state.inventory, item] });
+  pushItemUpserts([item]);
   return item;
 }
 
 export function updateInventoryItem(id: string, draft: ItemDraft): void {
-  setState({
-    ...state,
-    inventory: state.inventory.map((i) =>
-      i.id === id ? { ...i, ...draft, lastUpdated: todayISO() } : i
-    ),
+  let updated: InventoryItem | undefined;
+  const inventory = state.inventory.map((i) => {
+    if (i.id !== id) return i;
+    updated = { ...i, ...draft, lastUpdated: todayISO() };
+    return updated;
   });
+  setState({ ...state, inventory });
+  if (updated) pushItemUpserts([updated]);
 }
 
 export function deleteInventoryItem(id: string): void {
@@ -196,15 +264,29 @@ export function deleteInventoryItem(id: string): void {
     ...state,
     inventory: state.inventory.filter((i) => i.id !== id),
   });
+  pushItemDelete(id);
 }
 
 /**
- * Discard every borrow/return and inventory edit, restoring the seed data. Used
- * by the admin "reset data" control; also overwrites the persisted copy so the
- * seed sticks across reloads and syncs to other open tabs.
+ * Discard every borrow/return and restore the seed inventory (admin "reset
+ * data"). With Supabase this clears ALL borrow logs and rewrites inventory to
+ * the seed snapshot for everyone — it's a deliberate, destructive baseline.
  */
 export function resetStore(): void {
-  setState(seedState());
+  const seed = seedState();
+  setState(seed);
+  if (supabase) {
+    // Delete every log (PostgREST needs a filter; this one matches all rows).
+    queue(
+      () =>
+        supabase!
+          .from("borrow_logs")
+          .delete()
+          .neq("id", "00000000-0000-0000-0000-000000000000"),
+      "reset: clear logs"
+    );
+    pushItemUpserts(seed.inventory);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -214,7 +296,7 @@ export function resetStore(): void {
 export interface ActionResult {
   ok: boolean;
   error?: string;
-  /** Set when the change applied in memory but couldn't be persisted (see PERSIST_WARNING). */
+  /** Reserved for non-fatal warnings surfaced to the user (unused with Supabase). */
   warning?: string;
 }
 
@@ -225,8 +307,6 @@ export interface BorrowInput {
   borrowDate: string;
   /** Only for returnable items (อุปกรณ์ / วัสดุหมุนเวียน); may be empty / undefined. */
   expectedReturnDate?: string;
-  /** Optional borrow-time proof photo (data URL). */
-  proofPhoto?: string;
 }
 
 /** Append a "Borrowed" log and decrement the item's available stock. */
@@ -239,7 +319,7 @@ export function borrowItem(input: BorrowInput): ActionResult {
   }
 
   const log: BorrowLog = {
-    id: nextId(state.logs, "log"),
+    id: newLogId(),
     itemId: item.id,
     itemName: item.name,
     borrowerName: input.user.nickname,
@@ -250,24 +330,23 @@ export function borrowItem(input: BorrowInput): ActionResult {
     unit: item.unit,
     borrowDate: input.borrowDate,
     expectedReturnDate: input.expectedReturnDate || undefined,
-    proofPhoto: input.proofPhoto || undefined,
     status: "Borrowed",
   };
 
-  const saved = setState({
-    inventory: state.inventory.map((i) =>
-      i.id === item.id
-        ? {
-            ...i,
-            availableQuantity: i.availableQuantity - input.quantity,
-            lastUpdated: todayISO(),
-          }
-        : i
-    ),
+  const updatedItem: InventoryItem = {
+    ...item,
+    availableQuantity: item.availableQuantity - input.quantity,
+    lastUpdated: todayISO(),
+  };
+
+  setState({
+    inventory: state.inventory.map((i) => (i.id === item.id ? updatedItem : i)),
     logs: [log, ...state.logs],
   });
 
-  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
+  pushLogInserts([log]);
+  pushItemUpserts([updatedItem]);
+  return { ok: true };
 }
 
 /** One line of a multi-item borrow (an item + how many of it). */
@@ -284,8 +363,6 @@ export interface BorrowManyInput {
    * (อุปกรณ์ / วัสดุหมุนเวียน) in the batch; consumed items ignore it.
    */
   expectedReturnDate?: string;
-  /** Optional borrow-time proof photo (data URL), shared across the batch. */
-  proofPhoto?: string;
   lines: BorrowLineInput[];
 }
 
@@ -319,12 +396,12 @@ export function borrowItems(input: BorrowManyInput): ActionResult {
   });
   if (stockError) return { ok: false, error: stockError };
 
-  // Build the logs, assigning fresh ids that account for ones added this batch.
+  // Build the logs (one per line) with fresh UUID ids.
   const newLogs: BorrowLog[] = [];
   for (const line of input.lines) {
     const item = state.inventory.find((i) => i.id === line.itemId)!;
     newLogs.push({
-      id: nextId([...state.logs, ...newLogs], "log"),
+      id: newLogId(),
       itemId: item.id,
       itemName: item.name,
       borrowerName: input.user.nickname,
@@ -338,22 +415,23 @@ export function borrowItems(input: BorrowManyInput): ActionResult {
         input.expectedReturnDate && categoryNeedsReturnDate(item.category)
           ? input.expectedReturnDate
           : undefined,
-      proofPhoto: input.proofPhoto || undefined,
       status: "Borrowed",
     });
   }
 
-  const saved = setState({
-    inventory: state.inventory.map((i) => {
-      const dec = demand.get(i.id) ?? 0;
-      return dec
-        ? { ...i, availableQuantity: i.availableQuantity - dec, lastUpdated: todayISO() }
-        : i;
-    }),
-    logs: [...newLogs, ...state.logs],
+  const nextInventory = state.inventory.map((i) => {
+    const dec = demand.get(i.id) ?? 0;
+    return dec
+      ? { ...i, availableQuantity: i.availableQuantity - dec, lastUpdated: todayISO() }
+      : i;
   });
+  const changedItems = nextInventory.filter((i) => demand.has(i.id));
 
-  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
+  setState({ inventory: nextInventory, logs: [...newLogs, ...state.logs] });
+
+  pushLogInserts(newLogs);
+  pushItemUpserts(changedItems);
+  return { ok: true };
 }
 
 /* ------------------------------------------------------------------ */
@@ -396,44 +474,46 @@ export function updateLog(id: string, draft: LogDraft): void {
   const newEffect = outstandingQty(draft);
   const delta = oldEffect - newEffect; // > 0 gives stock back
 
+  let changedItem: InventoryItem | undefined;
+  const inventory =
+    delta === 0
+      ? state.inventory
+      : state.inventory.map((i) => {
+          if (i.id !== existing.itemId) return i;
+          changedItem = {
+            ...i,
+            availableQuantity: Math.max(
+              0,
+              Math.min(i.totalQuantity, i.availableQuantity + delta)
+            ),
+            lastUpdated: todayISO(),
+          };
+          return changedItem;
+        });
+
+  const updatedLog: BorrowLog = {
+    ...existing,
+    itemName: draft.itemName,
+    borrowerName: draft.borrowerName,
+    year: draft.year,
+    major: draft.major,
+    contact: draft.contact,
+    quantity: draft.quantity,
+    borrowDate: draft.borrowDate,
+    expectedReturnDate: draft.expectedReturnDate || undefined,
+    status: draft.status,
+    // Only a returned loan keeps a return date.
+    actualReturnDate:
+      draft.status === "Returned" ? draft.actualReturnDate || undefined : undefined,
+  };
+
   setState({
-    inventory:
-      delta === 0
-        ? state.inventory
-        : state.inventory.map((i) =>
-            i.id === existing.itemId
-              ? {
-                  ...i,
-                  availableQuantity: Math.max(
-                    0,
-                    Math.min(i.totalQuantity, i.availableQuantity + delta)
-                  ),
-                  lastUpdated: todayISO(),
-                }
-              : i
-          ),
-    logs: state.logs.map((l) =>
-      l.id === id
-        ? {
-            ...l,
-            itemName: draft.itemName,
-            borrowerName: draft.borrowerName,
-            year: draft.year,
-            major: draft.major,
-            contact: draft.contact,
-            quantity: draft.quantity,
-            borrowDate: draft.borrowDate,
-            expectedReturnDate: draft.expectedReturnDate || undefined,
-            status: draft.status,
-            // Only a returned loan keeps a return date.
-            actualReturnDate:
-              draft.status === "Returned"
-                ? draft.actualReturnDate || undefined
-                : undefined,
-          }
-        : l
-    ),
+    inventory,
+    logs: state.logs.map((l) => (l.id === id ? updatedLog : l)),
   });
+
+  pushLogUpserts([updatedLog]);
+  if (changedItem) pushItemUpserts([changedItem]);
 }
 
 /**
@@ -446,32 +526,36 @@ export function deleteLog(id: string): void {
 
   const restore = outstandingQty(existing);
 
+  let changedItem: InventoryItem | undefined;
+  const inventory =
+    restore === 0
+      ? state.inventory
+      : state.inventory.map((i) => {
+          if (i.id !== existing.itemId) return i;
+          changedItem = {
+            ...i,
+            availableQuantity: Math.min(
+              i.totalQuantity,
+              i.availableQuantity + restore
+            ),
+            lastUpdated: todayISO(),
+          };
+          return changedItem;
+        });
+
   setState({
-    inventory:
-      restore === 0
-        ? state.inventory
-        : state.inventory.map((i) =>
-            i.id === existing.itemId
-              ? {
-                  ...i,
-                  availableQuantity: Math.min(
-                    i.totalQuantity,
-                    i.availableQuantity + restore
-                  ),
-                  lastUpdated: todayISO(),
-                }
-              : i
-          ),
+    inventory,
     logs: state.logs.filter((l) => l.id !== id),
   });
+
+  pushLogDelete(id);
+  if (changedItem) pushItemUpserts([changedItem]);
 }
 
 export interface ReturnInput {
   /** The outstanding loan (log) being returned. */
   logId: string;
   actualReturnDate: string;
-  /** Optional return-time condition photo (data URL). */
-  proofPhoto?: string;
 }
 
 /** Close an outstanding loan and increment the item's available stock. */
@@ -482,41 +566,38 @@ export function returnLoan(input: ReturnInput): ActionResult {
     return { ok: false, error: "รายการนี้ถูกคืนไปแล้ว" };
   }
 
-  const saved = setState({
-    inventory: state.inventory.map((i) =>
-      i.id === log.itemId
-        ? {
-            ...i,
-            // Never exceed the total on hand.
-            availableQuantity: Math.min(
-              i.totalQuantity,
-              i.availableQuantity + log.quantity
-            ),
-            lastUpdated: todayISO(),
-          }
-        : i
-    ),
-    logs: state.logs.map((l) =>
-      l.id === input.logId
-        ? {
-            ...l,
-            status: "Returned",
-            actualReturnDate: input.actualReturnDate,
-            returnProofPhoto: input.proofPhoto || l.returnProofPhoto,
-          }
-        : l
-    ),
+  let changedItem: InventoryItem | undefined;
+  const inventory = state.inventory.map((i) => {
+    if (i.id !== log.itemId) return i;
+    changedItem = {
+      ...i,
+      // Never exceed the total on hand.
+      availableQuantity: Math.min(i.totalQuantity, i.availableQuantity + log.quantity),
+      lastUpdated: todayISO(),
+    };
+    return changedItem;
   });
 
-  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
+  const updatedLog: BorrowLog = {
+    ...log,
+    status: "Returned",
+    actualReturnDate: input.actualReturnDate,
+  };
+
+  setState({
+    inventory,
+    logs: state.logs.map((l) => (l.id === input.logId ? updatedLog : l)),
+  });
+
+  pushLogUpserts([updatedLog]);
+  if (changedItem) pushItemUpserts([changedItem]);
+  return { ok: true };
 }
 
 export interface ReturnManyInput {
   /** The outstanding loans (logs) being returned together. */
   logIds: string[];
   actualReturnDate: string;
-  /** Optional return-time condition photo (data URL), shared across the batch. */
-  proofPhoto?: string;
 }
 
 /**
@@ -552,28 +633,33 @@ export function returnLoans(input: ReturnManyInput): ActionResult {
     restore.set(log.itemId, (restore.get(log.itemId) ?? 0) + log.quantity);
   });
 
-  const saved = setState({
-    inventory: state.inventory.map((i) => {
-      const add = restore.get(i.id) ?? 0;
-      return add
-        ? {
-            ...i,
-            availableQuantity: Math.min(i.totalQuantity, i.availableQuantity + add),
-            lastUpdated: todayISO(),
-          }
-        : i;
-    }),
-    logs: state.logs.map((l) =>
-      unique.has(l.id)
-        ? {
-            ...l,
-            status: "Returned",
-            actualReturnDate: input.actualReturnDate,
-            returnProofPhoto: input.proofPhoto || l.returnProofPhoto,
-          }
-        : l
-    ),
+  const nextInventory = state.inventory.map((i) => {
+    const add = restore.get(i.id) ?? 0;
+    return add
+      ? {
+          ...i,
+          availableQuantity: Math.min(i.totalQuantity, i.availableQuantity + add),
+          lastUpdated: todayISO(),
+        }
+      : i;
+  });
+  const changedItems = nextInventory.filter((i) => restore.has(i.id));
+
+  const updatedLogs: BorrowLog[] = [];
+  const logs = state.logs.map((l) => {
+    if (!unique.has(l.id)) return l;
+    const updated: BorrowLog = {
+      ...l,
+      status: "Returned",
+      actualReturnDate: input.actualReturnDate,
+    };
+    updatedLogs.push(updated);
+    return updated;
   });
 
-  return saved ? { ok: true } : { ok: true, warning: PERSIST_WARNING };
+  setState({ inventory: nextInventory, logs });
+
+  pushLogUpserts(updatedLogs);
+  pushItemUpserts(changedItems);
+  return { ok: true };
 }

@@ -3,12 +3,11 @@
 import * as React from "react";
 import {
   Loader2,
-  Upload,
   PackageCheck,
   AlertTriangle,
-  X,
   Plus,
   Trash2,
+  MessageCircle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -25,7 +24,6 @@ import {
   EMPTY_USER_INFO,
   todayISO,
   validateUserInfo,
-  readProofImage,
   type UserInfo,
 } from "@/lib/borrow-utils";
 
@@ -45,9 +43,6 @@ export function ReturnForm() {
   const [user, setUser] = React.useState<UserInfo>(EMPTY_USER_INFO);
   const [lines, setLines] = React.useState<ReturnLine[]>(() => [firstLine()]);
   const [returnDate, setReturnDate] = React.useState(todayISO());
-  const [fileName, setFileName] = React.useState("");
-  const [proofPhoto, setProofPhoto] = React.useState("");
-  const [proofError, setProofError] = React.useState("");
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [toast, setToast] = React.useState<ToastData | null>(null);
@@ -115,36 +110,11 @@ export function ReturnForm() {
     return errs;
   }
 
-  async function handleProofChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) {
-      clearProof();
-      return;
-    }
-    const { dataUrl, error } = await readProofImage(file);
-    if (error || !dataUrl) {
-      setProofError(error ?? "อ่านไฟล์ไม่สำเร็จ");
-      setFileName("");
-      setProofPhoto("");
-      return;
-    }
-    setProofError("");
-    setFileName(file.name);
-    setProofPhoto(dataUrl);
-  }
-
-  function clearProof() {
-    setFileName("");
-    setProofPhoto("");
-    setProofError("");
-  }
-
   function resetForm() {
     setUser(EMPTY_USER_INFO);
     lineSeq.current = 1;
     setLines([firstLine()]);
     setReturnDate(todayISO());
-    clearProof();
     setErrors({});
     setFormKey((k) => k + 1);
   }
@@ -168,7 +138,6 @@ export function ReturnForm() {
       const result = returnLoans({
         logIds: lines.map((ln) => ln.logId),
         actualReturnDate: returnDate,
-        proofPhoto: proofPhoto || undefined,
       });
 
       if (!result.ok) {
@@ -355,42 +324,16 @@ export function ReturnForm() {
           </div>
         </section>
 
-        {/* ---- Photo / proof attachment ---- */}
-        <section className="space-y-1.5">
-          <Label htmlFor="return-proof">แนบรูปสภาพของที่คืน (ถ้ามี)</Label>
-          <label
-            htmlFor="return-proof"
-            className="flex cursor-pointer items-center gap-3 rounded-md border border-dashed border-input bg-background px-3 py-3 text-sm text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
-          >
-            <Upload className="h-4 w-4" />
-            {fileName || "เลือกไฟล์รูปภาพ…"}
-          </label>
-          <input
-            id="return-proof"
-            type="file"
-            accept="image/*"
-            className="sr-only"
-            onChange={handleProofChange}
-          />
-          <FieldError message={proofError} />
-          {proofPhoto && (
-            <div className="flex items-center gap-3 pt-1">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={proofPhoto}
-                alt="ตัวอย่างรูปสภาพของที่คืน"
-                className="h-16 w-16 rounded-md border border-border object-cover"
-              />
-              <button
-                type="button"
-                onClick={clearProof}
-                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-red-500"
-              >
-                <X className="h-3.5 w-3.5" />
-                ลบรูป
-              </button>
-            </div>
-          )}
+        {/* ---- Proof photo reminder (sent to the LINE OA, not this site) ---- */}
+        <section className="flex items-start gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
+          <MessageCircle className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" />
+          <div className="space-y-1 text-sm">
+            <p className="font-medium text-foreground">อย่าลืมส่งรูปสภาพของที่คืน</p>
+            <p className="text-muted-foreground">
+              หลังกดยืนยันการคืน กรุณา <strong>ถ่ายรูปสภาพของที่นำมาคืน แล้วส่งเข้า
+              LINE OA ของชมรม</strong> เพื่อเป็นหลักฐาน (ระบบนี้ไม่เก็บรูป — ส่งทางไลน์เท่านั้น)
+            </p>
+          </div>
         </section>
 
         {/* ---- Submit ---- */}
