@@ -287,6 +287,7 @@ export function BorrowForm() {
                         max={item?.availableQuantity ?? undefined}
                         value={ln.quantity}
                         onChange={(e) => updateLine(ln.key, { quantity: e.target.value })}
+                        onFocus={(e) => e.target.select()}
                         aria-invalid={!!qtyErr}
                       />
                     </div>
